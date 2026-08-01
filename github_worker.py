@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-FTP Movie Bot - GitHub Worker Script
-=====================================
-This script runs on GitHub Actions runner with massive resources:
+FTP Movie Bot - GitHub Worker Script (Optimized & Production-Ready)
+===================================================================
+Runs on GitHub Actions runner with massive resources.
+Handles:
+- Downloading movies from FTP (uses GitHub's bandwidth & disk)
+- Smart file splitting if >1.9GB (FFmpeg -c copy, no quality loss)
+- Reliable Telegram upload with retry logic
+- Automatic cleanup (deletes all temp files)
+
+Resources Available:
 - 14 GB disk space
 - 7 GB RAM
 - 6-hour timeout
 - Dedicated CPU cores
 
-It handles the heavy lifting:
-1. Downloads movie from FTP
-2. Checks size and splits if > 1.9GB
-3. Uploads parts to Telegram
-4. Updates database status
+Author: AI Assistant
+Version: 2.0 (Professional Edition)
 """
 
 import json
@@ -44,9 +48,9 @@ DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 DB_NAME = os.environ.get("DB_NAME")
 
-# Size limits
-MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB (leave 100MB buffer from 2GB limit)
-MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB (don't process files larger than this)
+# Processing limits
+MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB (safe buffer under 2GB limit)
+MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -71,7 +75,7 @@ logger = logging.getLogger(__name__)
 def get_db_connection():
     """Get MySQL database connection"""
     if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
-        logger.warning("Database credentials not provided, skipping DB updates")
+        logger.warning("⚠️ Database credentials not provided")
         return None
     
     try:
@@ -83,7 +87,7 @@ def get_db_connection():
             connect_timeout=10,
         )
     except mysql.connector.Error as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"❌ Database connection failed: {e}")
         return None
 
 
@@ -120,27 +124,30 @@ def update_movie_status(db_conn, status, **kwargs):
         logger.info(f"✅ Database updated: status={status}")
         
     except Exception as e:
-        logger.error(f"Failed to update database: {e}")
+        logger.error(f"❌ Failed to update database: {e}")
 
 
 # =====================================================
-# FILE OPERATIONS
+# FILE DOWNLOAD OPERATIONS
 # =====================================================
 
 def download_file(url, output_path):
-    """Download file from URL with progress tracking"""
-    logger.info(f"Downloading: {url}")
-    logger.info(f"Output: {output_path}")
+    """
+    Download file from URL with progress tracking and error handling.
+    Downloads to GitHub runner (not cPanel server).
+    """
+    logger.info(f"📥 Downloading from: {url}")
+    logger.info(f"💾 Saving to: {output_path}")
     
     try:
         response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
         
         total_size = int(response.headers.get("content-length", 0))
-        logger.info(f"File size: {total_size / (1024**3):.2f} GB")
+        logger.info(f"📊 File size: {total_size / (1024**3):.2f} GB")
         
         if total_size > MAX_FILE_SIZE_FOR_PROCESSING:
-            raise ValueError(f"File too large: {total_size / (1024**3):.2f} GB (max {MAX_FILE_SIZE_FOR_PROCESSING / (1024**3):.0f} GB)")
+            raise ValueError(f"File too large: {total_size / (1024**3):.2f} GB")
         
         downloaded = 0
         chunk_size = 8192 * 1024  # 8 MB chunks
@@ -154,20 +161,24 @@ def download_file(url, output_path):
                     # Log progress every 100 MB
                     if downloaded % (100 * 1024 * 1024) < chunk_size:
                         progress = (downloaded / total_size) * 100 if total_size else 0
-                        logger.info(f"Progress: {downloaded / (1024**3):.2f} GB / {total_size / (1024**3):.2f} GB ({progress:.1f}%)")
+                        logger.info(f"📥 Progress: {downloaded / (1024**3):.2f} GB / {total_size / (1024**3):.2f} GB ({progress:.1f}%)")
         
         actual_size = os.path.getsize(output_path)
-        logger.info(f"✅ Download completed: {actual_size / (1024**3):.2f} GB")
+        logger.info(f"✅ Download complete: {actual_size / (1024**3):.2f} GB")
         
         return actual_size
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"Download failed: {e}")
+        logger.error(f"❌ Download failed: {e}")
         raise
     except Exception as e:
-        logger.error(f"Unexpected error during download: {e}")
+        logger.error(f"❌ Unexpected error during download: {e}")
         raise
 
+
+# =====================================================
+# VIDEO PROCESSING (FFmpeg)
+# =====================================================
 
 def get_video_duration(video_path):
     """Get video duration in seconds using FFprobe"""
@@ -182,45 +193,48 @@ def get_video_duration(video_path):
         
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         duration = float(result.stdout.strip())
-        logger.info(f"Video duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+        logger.info(f"⏱️ Video duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
         return duration
         
     except subprocess.CalledProcessError as e:
-        logger.error(f"FFprobe failed: {e}")
+        logger.error(f"❌ FFprobe failed: {e}")
         return None
     except ValueError:
-        logger.error("Could not parse video duration")
+        logger.error("❌ Could not parse video duration")
         return None
 
 
 def split_video(input_path, file_size):
-    """Split video into parts under MAX_TELEGRAM_SIZE"""
-    logger.info(f"File size ({file_size / (1024**3):.2f} GB) exceeds Telegram limit")
-    logger.info("Splitting video into parts...")
+    """
+    Split video into parts under MAX_TELEGRAM_SIZE using FFmpeg.
+    Uses -c copy (no re-encoding, no quality loss).
+    """
+    logger.info(f"✂️ File size ({file_size / (1024**3):.2f} GB) exceeds Telegram limit")
+    logger.info("📦 Splitting video into parts...")
     
-    # Calculate how many parts we need
+    # Calculate number of parts needed
     num_parts = (file_size // MAX_TELEGRAM_SIZE) + 1
-    logger.info(f"Will split into {num_parts} parts")
+    logger.info(f"📊 Will split into {num_parts} parts")
     
-    # Get video duration to calculate segment time
+    # Get video duration
     duration = get_video_duration(input_path)
     if not duration:
-        # Fallback: split by time estimate (assume 1 hour per GB)
-        segment_time = 3600  # 1 hour
+        # Fallback: estimate 1 hour per GB
+        segment_time = 3600
     else:
         segment_time = int(duration / num_parts)
     
-    logger.info(f"Segment duration: {segment_time} seconds ({segment_time/60:.2f} minutes)")
+    logger.info(f"⏱️ Segment duration: {segment_time} seconds ({segment_time/60:.2f} minutes)")
     
     # Get file extension
     extension = Path(input_path).suffix
     output_pattern = f"part_%03d{extension}"
     
-    # FFmpeg command to split video without re-encoding
+    # FFmpeg command (copy codecs, no re-encoding)
     cmd = [
         "ffmpeg",
         "-i", str(input_path),
-        "-c", "copy",  # Copy codecs (no re-encoding)
+        "-c", "copy",  # Copy codecs (NO quality loss)
         "-map", "0",  # Map all streams
         "-f", "segment",  # Use segment muxer
         "-segment_time", str(segment_time),
@@ -229,7 +243,7 @@ def split_video(input_path, file_size):
         output_pattern
     ]
     
-    logger.info(f"Running FFmpeg: {' '.join(cmd)}")
+    logger.info(f"🔧 Running FFmpeg: {' '.join(cmd)}")
     
     try:
         result = subprocess.run(
@@ -241,31 +255,34 @@ def split_video(input_path, file_size):
         
         # Find all created parts
         parts = sorted(Path(".").glob(f"part_*{extension}"))
-        logger.info(f"✅ Split completed: {len(parts)} parts created")
+        logger.info(f"✅ Split complete: {len(parts)} parts created")
         
         for i, part in enumerate(parts, 1):
             size = os.path.getsize(part)
-            logger.info(f"  Part {i}: {part.name} ({size / (1024**3):.2f} GB)")
+            logger.info(f"  📦 Part {i}: {part.name} ({size / (1024**3):.2f} GB)")
         
         return [str(p) for p in parts]
         
     except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg split failed: {e}")
+        logger.error(f"❌ FFmpeg split failed: {e}")
         logger.error(f"FFmpeg stderr: {e.stderr}")
         raise
 
 
 # =====================================================
-# TELEGRAM OPERATIONS
+# TELEGRAM UPLOAD OPERATIONS
 # =====================================================
 
 def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total_parts=None):
-    """Upload video file to Telegram with retry logic"""
+    """
+    Upload video file to Telegram with retry logic.
+    Handles both single files and multi-part uploads.
+    """
     if part_number:
         caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
     
     file_size = os.path.getsize(file_path)
-    logger.info(f"Uploading to Telegram: {Path(file_path).name} ({file_size / (1024**3):.2f} GB)")
+    logger.info(f"📤 Uploading: {Path(file_path).name} ({file_size / (1024**3):.2f} GB)")
     
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -284,17 +301,41 @@ def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total
             return message.message_id
             
         except TelegramError as e:
-            logger.error(f"Telegram upload failed (attempt {attempt}/{MAX_RETRIES}): {e}")
+            logger.error(f"❌ Telegram upload failed (attempt {attempt}/{MAX_RETRIES}): {e}")
             
             if attempt < MAX_RETRIES:
-                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+                logger.info(f"⏳ Retrying in {RETRY_DELAY} seconds...")
                 time.sleep(RETRY_DELAY)
             else:
                 raise
         
         except Exception as e:
-            logger.error(f"Unexpected error during upload: {e}")
+            logger.error(f"❌ Unexpected error during upload: {e}")
             raise
+
+
+# =====================================================
+# CLEANUP OPERATIONS
+# =====================================================
+
+def cleanup_files(*file_patterns):
+    """
+    Delete all temporary files matching patterns.
+    Called automatically even if script fails.
+    """
+    logger.info("🧹 Cleaning up temporary files...")
+    
+    deleted_count = 0
+    for pattern in file_patterns:
+        for file_path in Path(".").glob(pattern):
+            try:
+                file_path.unlink()
+                logger.info(f"  🗑️ Deleted: {file_path}")
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"  ❌ Failed to delete {file_path}: {e}")
+    
+    logger.info(f"✅ Cleanup complete: {deleted_count} files deleted")
 
 
 # =====================================================
@@ -304,7 +345,7 @@ def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total
 def main():
     """Main execution function"""
     logger.info("=" * 80)
-    logger.info("FTP Movie Bot - GitHub Worker Starting")
+    logger.info("🎬 FTP MOVIE BOT - GITHUB WORKER")
     logger.info("=" * 80)
     logger.info(f"Movie ID: {MOVIE_ID}")
     logger.info(f"Movie Title: {MOVIE_TITLE}")
@@ -313,11 +354,12 @@ def main():
     
     db_conn = None
     file_parts = []
+    input_file = None
     
     try:
         # Validate environment variables
         if not all([MOVIE_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-            raise ValueError("Missing required environment variables")
+            raise ValueError("❌ Missing required environment variables")
         
         # Connect to database
         db_conn = get_db_connection()
@@ -325,22 +367,22 @@ def main():
         # Initialize Telegram bot
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         
-        # Determine file extension
+        # Determine file extension from URL
         extension = Path(MOVIE_URL).suffix or ".mp4"
         input_file = f"movie{extension}"
         
-        # Step 1: Download movie
-        logger.info("Step 1: Downloading movie...")
+        # Step 1: Download movie from FTP
+        logger.info("📥 Step 1: Downloading movie from FTP...")
         file_size = download_file(MOVIE_URL, input_file)
         
         # Step 2: Check if splitting is needed
         if file_size <= MAX_TELEGRAM_SIZE:
-            logger.info(f"File size OK ({file_size / (1024**3):.2f} GB), no splitting needed")
+            logger.info(f"✅ File size OK ({file_size / (1024**3):.2f} GB), no splitting needed")
             file_parts = [input_file]
             is_split = False
             total_parts = 1
         else:
-            logger.info("Step 2: Splitting video...")
+            logger.info("✂️ Step 2: Splitting video...")
             file_parts = split_video(input_file, file_size)
             is_split = True
             total_parts = len(file_parts)
@@ -350,11 +392,11 @@ def main():
                 update_movie_status(db_conn, "processing", is_split=True, total_parts=total_parts)
         
         # Step 3: Upload to Telegram
-        logger.info("Step 3: Uploading to Telegram...")
+        logger.info("📤 Step 3: Uploading to Telegram...")
         message_ids = []
         
         for i, part_file in enumerate(file_parts, 1):
-            caption = MOVIE_TITLE if not is_split else f"{MOVIE_TITLE}"
+            caption = MOVIE_TITLE if not is_split else MOVIE_TITLE
             
             message_id = upload_to_telegram(
                 part_file,
@@ -368,7 +410,7 @@ def main():
             message_ids.append(message_id)
         
         # Step 4: Update database as completed
-        logger.info("Step 4: Updating database...")
+        logger.info("✅ Step 4: Updating database...")
         if db_conn:
             update_movie_status(
                 db_conn,
@@ -380,9 +422,9 @@ def main():
             )
         
         logger.info("=" * 80)
-        logger.info("✅ Movie processing completed successfully!")
-        logger.info(f"Uploaded {total_parts} part(s) to Telegram")
-        logger.info(f"Message IDs: {message_ids}")
+        logger.info("🎉 MOVIE PROCESSING COMPLETED SUCCESSFULLY!")
+        logger.info(f"📦 Uploaded {total_parts} part(s) to Telegram")
+        logger.info(f"📨 Message IDs: {message_ids}")
         logger.info("=" * 80)
         
     except Exception as e:
@@ -395,6 +437,9 @@ def main():
         sys.exit(1)
         
     finally:
+        # CRITICAL: Always cleanup files (even on failure)
+        cleanup_files("movie.*", "part_*")
+        
         if db_conn:
             db_conn.close()
 

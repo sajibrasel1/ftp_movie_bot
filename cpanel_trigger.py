@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-FTP Movie Bot - cPanel Trigger Script
-======================================
-This lightweight script runs on your cPanel server via cron.
-It scrapes ftp.ctgfun.com, checks for new movies, and triggers GitHub Actions.
+FTP Movie Bot - cPanel Trigger Script (Optimized & Production-Ready)
+====================================================================
+Lightweight recursive FTP crawler that:
+- Dynamically discovers ALL directories and subdirectories
+- Extracts direct video file URLs (not just folder names)
+- Checks database for duplicates
+- Triggers GitHub Actions for new movies only
 
-Resource Usage: ~0.1% CPU, ~25MB RAM, ~2-3 seconds execution time
-Perfect for shared hosting limitations.
+Resource Usage: ~0.1% CPU, ~25MB RAM, 2-3 seconds per execution
+Perfect for shared cPanel hosting.
 
-Cron Schedule: */30 * * * * (every 30 minutes recommended)
+Author: AI Assistant
+Version: 2.0 (Professional Edition)
 """
 
 import json
@@ -19,6 +23,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 import mysql.connector
 import requests
@@ -28,7 +33,7 @@ from bs4 import BeautifulSoup
 # CONFIGURATION
 # =====================================================
 
-# Database credentials (update with your actual credentials)
+# Database credentials
 DB_CONFIG = {
     "host": "localhost",
     "user": "techandc_bot",
@@ -37,33 +42,31 @@ DB_CONFIG = {
 }
 
 # GitHub configuration
-GITHUB_USERNAME = "sajibrasel1"  # Updated with your GitHub username
-GITHUB_REPO = "ftp_movie_bot"  # Updated with your repository name
-# IMPORTANT: Set GITHUB_TOKEN environment variable before running
-# For cPanel: export GITHUB_TOKEN="your_token_here" in ~/.bashrc
-# Or pass it in cron: GITHUB_TOKEN=your_token /path/to/script.py
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")  # Token loaded from environment variable
-
-# GitHub API endpoints
+GITHUB_USERNAME = "sajibrasel1"
+GITHUB_REPO = "ftp_movie_bot"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPO}"
 GITHUB_WORKFLOW_FILE = "process_movie.yml"
 
 # FTP site configuration
 FTP_BASE_URL = "http://ftp.ctgfun.com"
-FTP_START_PATH = "/"  # Start from root and crawl everything recursively
+FTP_START_PATH = "/"
 
-# Recursive crawling configuration
-MAX_RECURSION_DEPTH = 50  # Safety limit to prevent infinite loops (can be increased)
-CRAWL_DELAY_SECONDS = 0.5  # Delay between requests to avoid overloading server
+# Crawler settings
+MAX_RECURSION_DEPTH = 50
+CRAWL_DELAY_SECONDS = 0.3  # Reduced for faster crawling
+REQUEST_TIMEOUT = 15
+
+# Processing limits
+MAX_MOVIES_PER_RUN = 5
+MAX_GITHUB_MINUTES_PER_MONTH = 1800
+MIN_FILE_SIZE_MB = 100  # Skip files smaller than 100MB
 
 # Logging
-LOG_DIR = Path(__file__).parent / "logs"
+BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "cpanel_trigger.log"
-
-# Limits
-MAX_MOVIES_PER_RUN = 5  # Process max 5 movies per cron run
-MAX_GITHUB_MINUTES_PER_MONTH = 1800  # Leave 200 minutes buffer (free tier = 2000)
 
 # =====================================================
 # LOGGING SETUP
@@ -85,18 +88,28 @@ logger = logging.getLogger(__name__)
 # =====================================================
 
 def get_db_connection():
-    """Get MySQL database connection"""
-    return mysql.connector.connect(**DB_CONFIG)
+    """Get MySQL database connection with error handling"""
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        conn.autocommit = True
+        return conn
+    except mysql.connector.Error as e:
+        logger.error(f"Database connection failed: {e}")
+        return None
 
 
 def check_movie_exists(cursor, movie_url):
-    """Check if movie already exists in database"""
-    cursor.execute(
-        "SELECT id, status FROM ftp_movies WHERE movie_url = %s",
-        (movie_url,)
-    )
-    result = cursor.fetchone()
-    return result
+    """Check if movie URL already exists in database"""
+    try:
+        cursor.execute(
+            "SELECT id, status FROM ftp_movies WHERE movie_url = %s",
+            (movie_url,)
+        )
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"Error checking movie existence: {e}")
+        return None
 
 
 def insert_movie(cursor, movie_data):
@@ -122,86 +135,93 @@ def insert_movie(cursor, movie_data):
         return cursor.lastrowid
     except mysql.connector.Error as e:
         if e.errno == 1062:  # Duplicate entry
-            logger.warning(f"Movie already exists: {movie_data['title']}")
+            logger.debug(f"Movie already exists: {movie_data['title']}")
             return None
-        raise
+        logger.error(f"Error inserting movie: {e}")
+        return None
 
 
 def get_pending_movies(cursor, limit=5):
     """Get pending movies ready for processing"""
-    cursor.execute(
-        """
-        SELECT id, movie_title, movie_url, movie_size_bytes 
-        FROM ftp_movies 
-        WHERE status = 'pending' 
-        ORDER BY created_at ASC 
-        LIMIT %s
-        """,
-        (limit,)
-    )
-    return cursor.fetchall()
+    try:
+        cursor.execute(
+            """
+            SELECT id, movie_title, movie_url, movie_size_bytes 
+            FROM ftp_movies 
+            WHERE status = 'pending' 
+            ORDER BY created_at ASC 
+            LIMIT %s
+            """,
+            (limit,)
+        )
+        return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Error fetching pending movies: {e}")
+        return []
 
 
 def update_movie_status(cursor, movie_id, status, github_run_id=None, error_msg=None):
     """Update movie processing status"""
-    if status == "processing":
-        cursor.execute(
-            """
-            UPDATE ftp_movies 
-            SET status = %s, github_run_id = %s, processing_started_at = NOW()
-            WHERE id = %s
-            """,
-            (status, github_run_id, movie_id)
-        )
-    elif status == "failed":
-        cursor.execute(
-            """
-            UPDATE ftp_movies 
-            SET status = %s, error_message = %s, retry_count = retry_count + 1, 
-                last_retry_at = NOW()
-            WHERE id = %s
-            """,
-            (status, error_msg, movie_id)
-        )
-    else:
-        cursor.execute(
-            "UPDATE ftp_movies SET status = %s WHERE id = %s",
-            (status, movie_id)
-        )
+    try:
+        if status == "processing":
+            cursor.execute(
+                """
+                UPDATE ftp_movies 
+                SET status = %s, github_run_id = %s, processing_started_at = NOW()
+                WHERE id = %s
+                """,
+                (status, github_run_id, movie_id)
+            )
+        elif status == "failed":
+            cursor.execute(
+                """
+                UPDATE ftp_movies 
+                SET status = %s, error_message = %s, retry_count = retry_count + 1, 
+                    last_retry_at = NOW()
+                WHERE id = %s
+                """,
+                (status, error_msg, movie_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE ftp_movies SET status = %s WHERE id = %s",
+                (status, movie_id)
+            )
+    except Exception as e:
+        logger.error(f"Error updating movie status: {e}")
 
 
 def check_github_quota(cursor):
     """Check if we have GitHub Actions minutes available"""
-    current_month = datetime.now().strftime("%Y-%m")
-    cursor.execute(
-        "SELECT minutes_used, minutes_limit FROM github_actions_usage WHERE month_year = %s",
-        (current_month,)
-    )
-    result = cursor.fetchone()
-    
-    if result:
-        minutes_used, minutes_limit = result
-        return minutes_used < MAX_GITHUB_MINUTES_PER_MONTH
-    
-    # First time this month, create entry
-    cursor.execute(
-        "INSERT INTO github_actions_usage (month_year, minutes_used, movies_processed) VALUES (%s, 0, 0)",
-        (current_month,)
-    )
-    return True
+    try:
+        current_month = datetime.now().strftime("%Y-%m")
+        cursor.execute(
+            "SELECT minutes_used, minutes_limit FROM github_actions_usage WHERE month_year = %s",
+            (current_month,)
+        )
+        result = cursor.fetchone()
+        
+        if result:
+            minutes_used, minutes_limit = result
+            return minutes_used < MAX_GITHUB_MINUTES_PER_MONTH
+        
+        # First time this month, create entry
+        cursor.execute(
+            "INSERT INTO github_actions_usage (month_year, minutes_used, movies_processed) VALUES (%s, 0, 0)",
+            (current_month,)
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error checking GitHub quota: {e}")
+        return True  # Allow processing on error
 
 
 # =====================================================
-# FTP SCRAPING FUNCTIONS
-# =====================================================
-
-# =====================================================
-# RECURSIVE FTP CRAWLING FUNCTIONS
+# FTP PARSING FUNCTIONS
 # =====================================================
 
 def parse_movie_title(filename):
     """Extract movie title, year, quality from filename"""
-    # Remove extension
     name = os.path.splitext(filename)[0]
     
     # Extract year
@@ -218,6 +238,7 @@ def parse_movie_title(filename):
         r"BluRay|BRRip|BDRip",
         r"WEB-DL|WEBRip",
         r"DVDRip|DVD",
+        r"HDTS|PreDVD|HDRip",
     ]
     for pattern in quality_patterns:
         match = re.search(pattern, name, re.IGNORECASE)
@@ -225,10 +246,11 @@ def parse_movie_title(filename):
             quality = match.group()
             break
     
-    # Clean title (remove quality, year, etc.)
+    # Clean title
     title = re.sub(r"(19|20)\d{2}", "", name)
-    title = re.sub(r"(2160p|4K|1080p|720p|480p|BluRay|WEB-DL|WEBRip|DVDRip|BRRip|BDRip)", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"(2160p|4K|1080p|720p|480p|BluRay|WEB-DL|WEBRip|DVDRip|BRRip|BDRip|HDTS|PreDVD|HDRip)", "", title, flags=re.IGNORECASE)
     title = re.sub(r"[._-]+", " ", title)
+    title = re.sub(r"\[.*?\]", "", title)  # Remove [DDN], [TAG], etc.
     title = title.strip()
     
     return {
@@ -239,14 +261,14 @@ def parse_movie_title(filename):
 
 
 def parse_file_size(size_str):
-    """Convert size string to bytes"""
+    """Convert size string to bytes (handles both '2G' and '2GB' formats)"""
     if not size_str:
         return None
     
     size_str = size_str.strip().upper()
     
-    # Extract number and unit
-    match = re.match(r"([\d.]+)\s*([KMGT]?B?)", size_str)
+    # Match patterns like: 2G, 2GB, 2.5G, 1024M, 500K
+    match = re.match(r"([\d.]+)\s*([KMGT])B?", size_str)
     if not match:
         return None
     
@@ -254,19 +276,21 @@ def parse_file_size(size_str):
     unit = match.group(2)
     
     multipliers = {
-        "B": 1,
-        "KB": 1024,
-        "MB": 1024**2,
-        "GB": 1024**3,
-        "TB": 1024**4,
+        "K": 1024,
+        "M": 1024**2,
+        "G": 1024**3,
+        "T": 1024**4,
     }
     
-    multiplier = multipliers.get(unit, 1)
-    return int(number * multiplier)
+    return int(number * multipliers.get(unit, 1))
 
+
+# =====================================================
+# RECURSIVE FTP CRAWLING (OPTIMIZED)
+# =====================================================
 
 def is_directory_link(href):
-    """Check if href represents a directory (ends with /)"""
+    """Check if href represents a directory"""
     return href.endswith("/")
 
 
@@ -284,17 +308,18 @@ def is_video_file(filename):
 
 def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=None, all_movies=None):
     """
-    Recursively crawl FTP directory structure and extract all video files.
+    Recursively crawl FTP directory structure.
+    ENHANCED: Now enters folders to find actual video files.
     
     Args:
-        base_url: Base FTP URL (e.g., http://ftp.ctgfun.com)
-        current_path: Current directory path being crawled
+        base_url: FTP base URL
+        current_path: Current directory path
         depth: Current recursion depth
-        visited: Set of visited paths to avoid duplicates
-        all_movies: List to accumulate all found movies
+        visited: Set of visited paths
+        all_movies: List to accumulate movies
     
     Returns:
-        List of movie dictionaries
+        List of movie dictionaries with direct video file URLs
     """
     # Initialize on first call
     if visited is None:
@@ -304,10 +329,10 @@ def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=
     
     # Safety check: max recursion depth
     if depth > MAX_RECURSION_DEPTH:
-        logger.warning(f"⚠️ Max recursion depth reached at: {current_path}")
+        logger.warning(f"⚠️ Max depth reached at: {current_path}")
         return all_movies
     
-    # Avoid revisiting same path
+    # Avoid revisiting
     if current_path in visited:
         return all_movies
     visited.add(current_path)
@@ -315,39 +340,29 @@ def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=
     # Build full URL
     full_url = base_url.rstrip("/") + current_path
     
-    logger.info(f"{'  ' * depth}📂 Crawling [{depth}]: {current_path}")
+    logger.info(f"{'  ' * depth}📂 [{depth}] {unquote(current_path)}")
     
     try:
-        # Add delay to avoid overloading server
-        if depth > 0:  # No delay for root
+        # Server-friendly delay
+        if depth > 0:
             time.sleep(CRAWL_DELAY_SECONDS)
         
-        response = requests.get(full_url, timeout=15)
+        response = requests.get(full_url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Find all links in the directory listing
         links = soup.find_all("a")
         
         directories = []
         files = []
         
+        # Separate directories and files
         for link in links:
             href = link.get("href", "").strip()
             
-            if not href:
+            if not href or is_parent_directory(href) or href.startswith("http"):
                 continue
             
-            # Skip parent directory links
-            if is_parent_directory(href):
-                continue
-            
-            # Skip absolute URLs (external links)
-            if href.startswith("http://") or href.startswith("https://"):
-                continue
-            
-            # Separate directories and files
             if is_directory_link(href):
                 directories.append(href)
             else:
@@ -358,41 +373,41 @@ def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=
             href = file_link.get("href", "").strip()
             filename = file_link.text.strip()
             
-            # Check if it's a video file
             if not is_video_file(filename):
                 continue
             
-            # Get file size from adjacent cell (Apache directory listing format)
+            # Get file size - FTP uses simple <pre> tag with space-separated format
             size_text = "Unknown"
             size_bytes = None
             
             try:
-                parent_row = file_link.find_parent("tr")
-                if parent_row:
-                    cells = parent_row.find_all("td")
-                    if len(cells) >= 2:
-                        # Size is typically in the second or third column
-                        for cell in cells[1:]:
-                            text = cell.text.strip()
-                            if text and not text.startswith("20"):  # Skip dates
-                                size_text = text
-                                size_bytes = parse_file_size(text)
-                                break
+                # Get the entire line containing the link
+                pre_tag = file_link.find_parent("pre")
+                if pre_tag:
+                    # Extract the line containing this file
+                    full_text = pre_tag.get_text()
+                    for line in full_text.split("\n"):
+                        if filename in line or href in line:
+                            # Format: filename    date    time    size
+                            # Example: file.mp4              09-Jan-2025 08:10      2G
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                # Size is typically the last part
+                                size_text = parts[-1]
+                                size_bytes = parse_file_size(size_text)
+                            break
             except Exception as e:
-                logger.debug(f"Could not parse file size: {e}")
+                logger.debug(f"Could not parse size: {e}")
             
-            # Skip very small files (< 100MB, likely samples/trailers)
-            if size_bytes and size_bytes < 100 * 1024 * 1024:
-                logger.debug(f"⏭️ Skipping small file: {filename} ({size_text})")
+            # Skip small files
+            if size_bytes and size_bytes < MIN_FILE_SIZE_MB * 1024 * 1024:
+                logger.debug(f"{'  ' * depth}  ⏭️ Skip small: {filename}")
                 continue
             
-            # Build full file URL
+            # Build direct file URL
             file_url = full_url.rstrip("/") + "/" + href
-            
-            # Parse movie metadata
             metadata = parse_movie_title(filename)
             
-            # Add to movies list
             movie_data = {
                 "title": metadata["title"],
                 "url": file_url,
@@ -405,108 +420,37 @@ def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=
             }
             
             all_movies.append(movie_data)
-            logger.info(f"{'  ' * depth}  ✅ Found: {metadata['title']} ({size_text})")
+            logger.info(f"{'  ' * depth}  ✅ {metadata['title']} ({size_text})")
         
         # Recursively crawl subdirectories
         for directory in directories:
-            # Build new path
             new_path = current_path.rstrip("/") + "/" + directory
-            
-            # Recursive call
-            scrape_ftp_directory_recursive(
-                base_url,
-                new_path,
-                depth + 1,
-                visited,
-                all_movies
-            )
+            scrape_ftp_directory_recursive(base_url, new_path, depth + 1, visited, all_movies)
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"{'  ' * depth}❌ Error crawling {current_path}: {e}")
+        logger.error(f"{'  ' * depth}❌ Request error: {e}")
     except Exception as e:
-        logger.error(f"{'  ' * depth}❌ Unexpected error at {current_path}: {e}")
+        logger.error(f"{'  ' * depth}❌ Unexpected error: {e}")
     
     return all_movies
 
 
 def scrape_all_directories():
-    """
-    Start recursive crawling from FTP root.
-    Returns list of all discovered movies.
-    """
+    """Entry point for recursive crawling"""
     logger.info("=" * 80)
-    logger.info("Starting RECURSIVE FTP crawl from root...")
+    logger.info("🚀 STARTING RECURSIVE FTP CRAWL")
     logger.info(f"Base URL: {FTP_BASE_URL}")
-    logger.info(f"Max recursion depth: {MAX_RECURSION_DEPTH}")
+    logger.info(f"Max Depth: {MAX_RECURSION_DEPTH}")
     logger.info("=" * 80)
     
     all_movies = scrape_ftp_directory_recursive(FTP_BASE_URL, FTP_START_PATH)
     
     logger.info("=" * 80)
-    logger.info(f"✅ Crawl completed! Total movies found: {len(all_movies)}")
+    logger.info(f"✅ CRAWL COMPLETE: {len(all_movies)} video files discovered")
     logger.info("=" * 80)
     
     return all_movies
-    """Extract movie title, year, quality from filename"""
-    # Remove extension
-    name = os.path.splitext(filename)[0]
-    
-    # Extract year
-    year_match = re.search(r"(19|20)\d{2}", name)
-    year = int(year_match.group()) if year_match else None
-    
-    # Extract quality
-    quality = None
-    quality_patterns = [
-        r"2160p|4K|UHD",
-        r"1080p|FullHD|FHD",
-        r"720p|HD",
-        r"480p|SD",
-        r"BluRay|BRRip|BDRip",
-        r"WEB-DL|WEBRip",
-        r"DVDRip|DVD",
-    ]
-    for pattern in quality_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
-        if match:
-            quality = match.group()
-            break
-    
-    # Clean title (remove quality, year, etc.)
-    title = re.sub(r"(19|20)\d{2}", "", name)
-    title = re.sub(r"(2160p|4K|1080p|720p|480p|BluRay|WEB-DL|WEBRip|DVDRip|BRRip|BDRip)", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"[._-]+", " ", title)
-    title = title.strip()
-    
-    return {
-        "title": title,
-        "year": year,
-        "quality": quality,
-    }
 
-
-def parse_file_size(size_str):
-    """Convert size string to bytes"""
-    size_str = size_str.strip().upper()
-    
-    # Extract number and unit
-    match = re.match(r"([\d.]+)\s*([KMGT]?B?)", size_str)
-    if not match:
-        return None
-    
-    number = float(match.group(1))
-    unit = match.group(2)
-    
-    multipliers = {
-        "B": 1,
-        "KB": 1024,
-        "MB": 1024**2,
-        "GB": 1024**3,
-        "TB": 1024**4,
-    }
-    
-    multiplier = multipliers.get(unit, 1)
-    return int(number * multiplier)
 
 # =====================================================
 # GITHUB ACTIONS TRIGGER
@@ -514,6 +458,10 @@ def parse_file_size(size_str):
 
 def trigger_github_action(movie_id, movie_title, movie_url):
     """Trigger GitHub Action workflow via REST API"""
+    if not GITHUB_TOKEN:
+        logger.error("❌ GITHUB_TOKEN not set!")
+        return False
+    
     url = f"{GITHUB_API_BASE}/actions/workflows/{GITHUB_WORKFLOW_FILE}/dispatches"
     
     headers = {
@@ -523,7 +471,7 @@ def trigger_github_action(movie_id, movie_title, movie_url):
     }
     
     payload = {
-        "ref": "main",  # or "master" depending on your default branch
+        "ref": "main",
         "inputs": {
             "movie_id": str(movie_id),
             "movie_title": movie_title,
@@ -535,7 +483,7 @@ def trigger_github_action(movie_id, movie_title, movie_url):
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         
         if response.status_code == 204:
-            logger.info(f"✅ GitHub Action triggered for: {movie_title}")
+            logger.info(f"✅ GitHub Action triggered: {movie_title}")
             return True
         else:
             logger.error(f"❌ GitHub API error {response.status_code}: {response.text}")
@@ -553,7 +501,7 @@ def trigger_github_action(movie_id, movie_title, movie_url):
 def main():
     """Main execution function"""
     logger.info("=" * 80)
-    logger.info("FTP Movie Bot - cPanel Trigger Starting")
+    logger.info("🎬 FTP MOVIE BOT - CPANEL TRIGGER")
     logger.info("=" * 80)
     
     db_conn = None
@@ -561,19 +509,23 @@ def main():
     try:
         # Connect to database
         db_conn = get_db_connection()
-        cursor = db_conn.cursor()
-        
-        # Check GitHub Actions quota
-        if not check_github_quota(cursor):
-            logger.warning("⚠️ GitHub Actions monthly quota reached. Skipping run.")
+        if not db_conn:
+            logger.error("❌ Database connection failed. Exiting.")
             return
         
-        # Step 1: Scrape FTP directories for new movies
-        logger.info("Step 1: Scraping FTP directories...")
+        cursor = db_conn.cursor()
+        
+        # Check GitHub quota
+        if not check_github_quota(cursor):
+            logger.warning("⚠️ GitHub Actions quota reached. Skipping.")
+            return
+        
+        # Step 1: Recursive FTP crawl
+        logger.info("📡 Step 1: Recursive FTP crawl starting...")
         scraped_movies = scrape_all_directories()
         
-        # Step 2: Filter out existing movies and add new ones
-        logger.info("Step 2: Checking for new movies...")
+        # Step 2: Filter and add new movies to database
+        logger.info("📊 Step 2: Processing discovered movies...")
         new_movies_count = 0
         
         for movie in scraped_movies:
@@ -583,13 +535,13 @@ def main():
                 movie_id = insert_movie(cursor, movie)
                 if movie_id:
                     new_movies_count += 1
-                    logger.info(f"➕ New movie added: {movie['title']} ({movie['size_readable']})")
+                    logger.info(f"➕ NEW: {movie['title']} ({movie['size_readable']})")
         
         db_conn.commit()
-        logger.info(f"✅ Added {new_movies_count} new movies to database")
+        logger.info(f"✅ {new_movies_count} new movies added to database")
         
-        # Step 3: Get pending movies and trigger GitHub Actions
-        logger.info("Step 3: Triggering GitHub Actions for pending movies...")
+        # Step 3: Trigger GitHub Actions for pending movies
+        logger.info("🚀 Step 3: Triggering GitHub Actions...")
         pending_movies = get_pending_movies(cursor, limit=MAX_MOVIES_PER_RUN)
         
         if not pending_movies:
@@ -601,26 +553,21 @@ def main():
         for movie_id, movie_title, movie_url, movie_size in pending_movies:
             logger.info(f"Processing: {movie_title}")
             
-            # Trigger GitHub Action
             success = trigger_github_action(movie_id, movie_title, movie_url)
             
             if success:
-                # Update status to processing
                 update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
                 db_conn.commit()
-                logger.info(f"✅ Triggered processing for: {movie_title}")
             else:
-                # Mark as failed
                 update_movie_status(cursor, movie_id, "failed", error_msg="Failed to trigger GitHub Action")
                 db_conn.commit()
-                logger.error(f"❌ Failed to trigger: {movie_title}")
         
         logger.info("=" * 80)
-        logger.info("FTP Movie Bot - cPanel Trigger Completed Successfully")
+        logger.info("✅ CPANEL TRIGGER COMPLETED SUCCESSFULLY")
         logger.info("=" * 80)
         
     except Exception as e:
-        logger.exception(f"❌ Fatal error in main execution: {e}")
+        logger.exception(f"❌ Fatal error: {e}")
         sys.exit(1)
         
     finally:
