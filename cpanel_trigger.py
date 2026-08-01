@@ -58,7 +58,7 @@ CRAWL_DELAY_SECONDS = 0.3  # Reduced for faster crawling
 REQUEST_TIMEOUT = 15
 
 # Processing limits
-MAX_MOVIES_PER_RUN = 5
+MAX_MOVIES_PER_RUN = 2  # Process 2 movies at a time (faster and more stable)
 MAX_GITHUB_MINUTES_PER_MONTH = 1800
 MIN_FILE_SIZE_MB = 100  # Skip files smaller than 100MB
 
