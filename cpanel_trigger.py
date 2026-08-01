@@ -520,6 +520,35 @@ def main():
             logger.warning("⚠️ GitHub Actions quota reached. Skipping.")
             return
         
+        # OPTIMIZED: Check for pending movies FIRST
+        logger.info("🔍 Checking for pending movies in database...")
+        pending_movies = get_pending_movies(cursor, limit=MAX_MOVIES_PER_RUN)
+        
+        if pending_movies:
+            # We have pending movies - process them immediately (skip crawling)
+            logger.info(f"✅ Found {len(pending_movies)} pending movies - skipping FTP crawl")
+            logger.info("🚀 Triggering GitHub Actions for pending movies...")
+            
+            for movie_id, movie_title, movie_url, movie_size in pending_movies:
+                logger.info(f"Processing: {movie_title}")
+                
+                success = trigger_github_action(movie_id, movie_title, movie_url)
+                
+                if success:
+                    update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
+                    db_conn.commit()
+                else:
+                    update_movie_status(cursor, movie_id, "failed", error_msg="Failed to trigger GitHub Action")
+                    db_conn.commit()
+            
+            logger.info("=" * 80)
+            logger.info("✅ CPANEL TRIGGER COMPLETED SUCCESSFULLY")
+            logger.info("=" * 80)
+            return
+        
+        # No pending movies - do FTP crawl to find new content
+        logger.info("ℹ️ No pending movies found - starting FTP crawl...")
+        
         # Step 1: Recursive FTP crawl
         logger.info("📡 Step 1: Recursive FTP crawl starting...")
         scraped_movies = scrape_all_directories()
@@ -540,27 +569,22 @@ def main():
         db_conn.commit()
         logger.info(f"✅ {new_movies_count} new movies added to database")
         
-        # Step 3: Trigger GitHub Actions for pending movies
-        logger.info("🚀 Step 3: Triggering GitHub Actions...")
-        pending_movies = get_pending_movies(cursor, limit=MAX_MOVIES_PER_RUN)
-        
-        if not pending_movies:
-            logger.info("ℹ️ No pending movies to process")
-            return
-        
-        logger.info(f"Found {len(pending_movies)} pending movies")
-        
-        for movie_id, movie_title, movie_url, movie_size in pending_movies:
-            logger.info(f"Processing: {movie_title}")
+        # Step 3: Trigger GitHub Actions for newly added movies
+        if new_movies_count > 0:
+            logger.info("🚀 Step 3: Triggering GitHub Actions for new movies...")
+            pending_movies = get_pending_movies(cursor, limit=MAX_MOVIES_PER_RUN)
             
-            success = trigger_github_action(movie_id, movie_title, movie_url)
-            
-            if success:
-                update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
-                db_conn.commit()
-            else:
-                update_movie_status(cursor, movie_id, "failed", error_msg="Failed to trigger GitHub Action")
-                db_conn.commit()
+            for movie_id, movie_title, movie_url, movie_size in pending_movies:
+                logger.info(f"Processing: {movie_title}")
+                
+                success = trigger_github_action(movie_id, movie_title, movie_url)
+                
+                if success:
+                    update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
+                    db_conn.commit()
+                else:
+                    update_movie_status(cursor, movie_id, "failed", error_msg="Failed to trigger GitHub Action")
+                    db_conn.commit()
         
         logger.info("=" * 80)
         logger.info("✅ CPANEL TRIGGER COMPLETED SUCCESSFULLY")
