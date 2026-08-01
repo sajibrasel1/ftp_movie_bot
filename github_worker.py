@@ -55,7 +55,7 @@ MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 
 # Retry configuration
 MAX_DOWNLOAD_RETRIES = None  # None = unlimited retries (will keep trying until success)
-MAX_UPLOAD_RETRIES = 3  # Telegram upload retries
+MAX_UPLOAD_RETRIES = 5  # Telegram upload retries (increased for large files)
 RETRY_DELAY = 10  # Retry delay in seconds
 # GitHub Actions has 6-hour timeout, so it will retry within that time
 RETRY_DELAY_BASE = 5  # Base delay in seconds (will increase: 5s, 10s, 15s... up to 60s max)
@@ -320,12 +320,20 @@ async def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None,
     """
     Upload video file to Telegram with retry logic.
     Handles both single files and multi-part uploads.
+    Uses extended timeouts for large files.
     """
     if part_number:
         caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
     
     file_size = os.path.getsize(file_path)
     logger.info(f"📤 Uploading: {Path(file_path).name} ({file_size / (1024**3):.2f} GB)")
+    
+    # Calculate appropriate timeout based on file size
+    # Estimate: ~1 minute per 100MB for slow connections
+    estimated_upload_time = (file_size / (100 * 1024 * 1024)) * 60
+    upload_timeout = max(600, int(estimated_upload_time * 2))  # At least 10 minutes, or 2x estimated time
+    
+    logger.info(f"⏱️ Upload timeout set to: {upload_timeout} seconds ({upload_timeout/60:.1f} minutes)")
     
     for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
         try:
@@ -335,9 +343,10 @@ async def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None,
                     video=video_file,
                     caption=caption,
                     supports_streaming=True,
-                    read_timeout=300,
-                    write_timeout=300,
-                    connect_timeout=60,
+                    read_timeout=upload_timeout,
+                    write_timeout=upload_timeout,
+                    connect_timeout=120,  # 2 minutes for initial connection
+                    pool_timeout=120,
                 )
             
             logger.info(f"✅ Upload successful: Message ID {message.message_id}")
@@ -347,8 +356,9 @@ async def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None,
             logger.error(f"❌ Telegram upload failed (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
             if attempt < MAX_UPLOAD_RETRIES:
-                logger.info(f"⏳ Retrying in {RETRY_DELAY} seconds...")
-                await asyncio.sleep(RETRY_DELAY)
+                wait_time = RETRY_DELAY * attempt  # Exponential backoff: 10s, 20s, 30s
+                logger.info(f"⏳ Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
             else:
                 raise
         
