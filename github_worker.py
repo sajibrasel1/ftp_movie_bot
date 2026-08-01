@@ -19,6 +19,7 @@ Author: AI Assistant
 Version: 2.0 (Professional Edition)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 # Retry configuration
 MAX_DOWNLOAD_RETRIES = None  # None = unlimited retries (will keep trying until success)
 MAX_UPLOAD_RETRIES = 3  # Telegram upload retries
+RETRY_DELAY = 10  # Retry delay in seconds
 # GitHub Actions has 6-hour timeout, so it will retry within that time
 RETRY_DELAY_BASE = 5  # Base delay in seconds (will increase: 5s, 10s, 15s... up to 60s max)
 
@@ -314,7 +316,7 @@ def split_video(input_path, file_size):
 # TELEGRAM UPLOAD OPERATIONS
 # =====================================================
 
-def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total_parts=None):
+async def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total_parts=None):
     """
     Upload video file to Telegram with retry logic.
     Handles both single files and multi-part uploads.
@@ -328,7 +330,7 @@ def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total
     for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
         try:
             with open(file_path, "rb") as video_file:
-                message = bot.send_video(
+                message = await bot.send_video(
                     chat_id=chat_id,
                     video=video_file,
                     caption=caption,
@@ -342,11 +344,11 @@ def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total
             return message.message_id
             
         except TelegramError as e:
-            logger.error(f"❌ Telegram upload failed (attempt {attempt}/{MAX_RETRIES}): {e}")
+            logger.error(f"❌ Telegram upload failed (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
             if attempt < MAX_UPLOAD_RETRIES:
                 logger.info(f"⏳ Retrying in {RETRY_DELAY} seconds...")
-                time.sleep(RETRY_DELAY)
+                await asyncio.sleep(RETRY_DELAY)
             else:
                 raise
         
@@ -383,7 +385,7 @@ def cleanup_files(*file_patterns):
 # MAIN EXECUTION
 # =====================================================
 
-def main():
+async def main():
     """Main execution function"""
     logger.info("=" * 80)
     logger.info("🎬 FTP MOVIE BOT - GITHUB WORKER")
@@ -439,7 +441,7 @@ def main():
         for i, part_file in enumerate(file_parts, 1):
             caption = MOVIE_TITLE if not is_split else MOVIE_TITLE
             
-            message_id = upload_to_telegram(
+            message_id = await upload_to_telegram(
                 part_file,
                 caption,
                 bot,
@@ -486,4 +488,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
