@@ -53,8 +53,9 @@ MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB (safe buffer under 2GB limit)
 MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 
 # Retry configuration
-MAX_RETRIES = 5  # Increased to 5 attempts
-RETRY_DELAY = 5  # seconds
+MAX_DOWNLOAD_RETRIES = None  # None = unlimited retries (will keep trying until success)
+# GitHub Actions has 6-hour timeout, so it will retry within that time
+RETRY_DELAY_BASE = 5  # Base delay in seconds (will increase: 5s, 10s, 15s... up to 60s max)
 
 # =====================================================
 # LOGGING SETUP
@@ -136,16 +137,32 @@ def update_movie_status(db_conn, status, **kwargs):
 # FILE DOWNLOAD OPERATIONS
 # =====================================================
 
-def download_file(url, output_path, max_retries=3):
+def download_file(url, output_path, max_retries=None):
     """
-    Download file from URL with progress tracking, error handling, and retry logic.
+    Download file from URL with progress tracking, error handling, and unlimited retry logic.
     Downloads to GitHub runner (not cPanel server).
+    
+    Args:
+        url: FTP URL to download from
+        output_path: Local path to save file
+        max_retries: Maximum retry attempts (None = unlimited)
     """
     logger.info(f"📥 Downloading from: {url}")
     logger.info(f"💾 Saving to: {output_path}")
     
-    for attempt in range(1, max_retries + 1):
+    attempt = 0
+    
+    while True:
+        attempt += 1
+        
+        # Check if we've exceeded max retries (if set)
+        if max_retries is not None and attempt > max_retries:
+            logger.error(f"❌ All {max_retries} download attempts failed")
+            raise Exception(f"Failed to download after {max_retries} attempts")
+        
         try:
+            logger.info(f"🔄 Download attempt #{attempt}" + (" (unlimited retries)" if max_retries is None else f"/{max_retries}"))
+            
             # Use longer timeout and connection settings
             response = requests.get(
                 url, 
@@ -184,20 +201,19 @@ def download_file(url, output_path, max_retries=3):
             return actual_size
             
         except (requests.exceptions.RequestException, Exception) as e:
-            logger.error(f"❌ Download attempt {attempt}/{max_retries} failed: {e}")
+            logger.error(f"❌ Download attempt #{attempt} failed: {e}")
             
             # Clean up partial download
             if os.path.exists(output_path):
                 os.remove(output_path)
                 logger.info(f"🗑️ Removed partial download")
             
-            if attempt < max_retries:
-                wait_time = attempt * 10  # Exponential backoff: 10s, 20s, 30s
-                logger.info(f"⏳ Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                logger.error(f"❌ All {max_retries} download attempts failed")
-                raise
+            # Calculate exponential backoff wait time (cap at 60 seconds)
+            wait_time = min(attempt * 5, 60)
+            logger.info(f"⏳ Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+            
+            # Continue to next iteration (retry)
 
 
 # =====================================================
@@ -397,7 +413,7 @@ def main():
         
         # Step 1: Download movie from FTP
         logger.info("📥 Step 1: Downloading movie from FTP...")
-        file_size = download_file(MOVIE_URL, input_file)
+        file_size = download_file(MOVIE_URL, input_file, max_retries=MAX_DOWNLOAD_RETRIES)
         
         # Step 2: Check if splitting is needed
         if file_size <= MAX_TELEGRAM_SIZE:
