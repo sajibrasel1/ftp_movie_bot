@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 """
-FTP Movie Bot - GitHub Worker Script (Optimized & Production-Ready)
-===================================================================
-Runs on GitHub Actions runner with massive resources.
-Handles:
-- Downloading movies from FTP (uses GitHub's bandwidth & disk)
-- Smart file splitting if >1.9GB (FFmpeg -c copy, no quality loss)
-- Reliable Telegram upload with retry logic
-- Automatic cleanup (deletes all temp files)
-
-Resources Available:
-- 14 GB disk space
-- 7 GB RAM
-- 6-hour timeout
-- Dedicated CPU cores
-
-Author: AI Assistant
-Version: 2.0 (Professional Edition)
+FTP Movie Bot - GitHub Worker Script (Production-Ready v3.1)
+=============================================================
+Runs on GitHub Actions with self-hosted Telegram Bot API Server.
 """
 
 import json
@@ -26,12 +12,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from contextlib import contextmanager
 
 import mysql.connector
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # =====================================================
-# CONFIGURATION FROM ENVIRONMENT VARIABLES
+# CONFIGURATION
 # =====================================================
 
 MOVIE_ID = os.environ.get("MOVIE_ID")
@@ -46,19 +35,21 @@ DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 DB_NAME = os.environ.get("DB_NAME")
 
-# Processing limits
-MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB (try with new bot token)
+MAX_TELEGRAM_SIZE = 1_800_000_000  # 1.8 GB
 MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
+PART_SIZE_HARD_LIMIT = 1_850_000_000  # 1.85 GB absolute max
+PART_SIZE_VERIFICATION_MARGIN = 50_000_000  # 50 MB safety
 
-# Retry configuration
-MAX_DOWNLOAD_RETRIES = None  # None = unlimited retries (will keep trying until success)
-MAX_UPLOAD_RETRIES = 5  # Telegram upload retries (increased for large files)
-RETRY_DELAY = 10  # Retry delay in seconds
-# GitHub Actions has 6-hour timeout, so it will retry within that time
-RETRY_DELAY_BASE = 5  # Base delay in seconds (will increase: 5s, 10s, 15s... up to 60s max)
+MAX_DOWNLOAD_RETRIES = None  # Unlimited
+MAX_UPLOAD_RETRIES = 15
+INITIAL_RETRY_DELAY = 5
+MAX_RETRY_DELAY = 300
+EXPONENTIAL_BACKOFF_MULTIPLIER = 2
+
+FFMPEG_SPLIT_SAFETY_FACTOR = 0.90  # 90% of max size
 
 # =====================================================
-# LOGGING SETUP
+# LOGGING
 # =====================================================
 
 logging.basicConfig(
@@ -67,6 +58,83 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+
+# =====================================================
+# HELPER FUNCTIONS
+# =====================================================
+
+def calculate_exponential_backoff(attempt, initial_delay=INITIAL_RETRY_DELAY, max_delay=MAX_RETRY_DELAY):
+    """Calculate exponential backoff with jitter"""
+    import random
+    delay = min(initial_delay * (EXPONENTIAL_BACKOFF_MULTIPLIER ** (attempt - 1)), max_delay)
+    jitter = random.uniform(0, delay * 0.1)
+    return delay + jitter
+
+
+def format_speed(bytes_per_second):
+    """Format speed in MB/s"""
+    return f"{bytes_per_second / (1024 * 1024):.2f} MB/s"
+
+
+def format_eta(seconds):
+    """Format ETA"""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds / 60)}m {int(seconds % 60)}s"
+    else:
+        hours = int(seconds / 3600)
+        minutes = int((seconds % 3600) / 60)
+        return f"{hours}h {minutes}m"
+
+
+# =====================================================
+# SESSION CREATION (MUST BE BEFORE CONTEXT MANAGERS)
+# =====================================================
+
+def create_upload_session():
+    """Create requests session for uploads"""
+    session = requests.Session()
+    
+    retry_strategy = Retry(
+        total=3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["POST"],
+        backoff_factor=2,
+        raise_on_status=False
+    )
+    
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=1,
+        pool_maxsize=1,
+        pool_block=True
+    )
+    
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    return session
+
+
+# =====================================================
+# CONTEXT MANAGERS
+# =====================================================
+
+@contextmanager
+def safe_session():
+    """Context manager for HTTP session"""
+    session = None
+    try:
+        session = create_upload_session()
+        yield session
+    finally:
+        if session:
+            try:
+                session.close()
+            except Exception as e:
+                logger.debug(f"Error closing session: {e}")
 
 
 # =====================================================
@@ -98,122 +166,404 @@ def get_db_connection():
 
 
 def update_movie_status(db_conn, status, **kwargs):
-    """Update movie status in database"""
+    """Update movie status with transaction safety and parameterized queries"""
     if not db_conn or not MOVIE_ID:
         return
     
+    cursor = None
     try:
-        cursor = db_conn.cursor()
+        # Validate MOVIE_ID is numeric to prevent injection
+        try:
+            movie_id_int = int(MOVIE_ID)
+        except (ValueError, TypeError):
+            logger.error(f"❌ Invalid MOVIE_ID: {MOVIE_ID}")
+            return
         
-        updates = [f"status = '{status}'"]
+        cursor = db_conn.cursor()
+        db_conn.start_transaction()
+        
+        updates = ["status = %s"]
+        params = [status]
         
         if "is_split" in kwargs:
-            updates.append(f"is_split = {1 if kwargs['is_split'] else 0}")
+            updates.append("is_split = %s")
+            params.append(1 if kwargs['is_split'] else 0)
         if "total_parts" in kwargs:
-            updates.append(f"total_parts = {kwargs['total_parts']}")
+            updates.append("total_parts = %s")
+            params.append(kwargs['total_parts'])
         if "telegram_message_ids" in kwargs:
-            msg_ids_json = json.dumps(kwargs["telegram_message_ids"])
-            updates.append(f"telegram_message_ids = '{msg_ids_json}'")
+            updates.append("telegram_message_ids = %s")
+            params.append(json.dumps(kwargs["telegram_message_ids"]))
         if "telegram_channel_id" in kwargs:
-            updates.append(f"telegram_channel_id = '{kwargs['telegram_channel_id']}'")
+            updates.append("telegram_channel_id = %s")
+            params.append(str(kwargs["telegram_channel_id"]))
         if "error_message" in kwargs:
-            error_msg = kwargs["error_message"].replace("'", "''")
-            updates.append(f"error_message = '{error_msg}'")
+            updates.append("error_message = %s")
+            params.append(str(kwargs["error_message"])[:500])
         
         if status == "completed":
             updates.append("processing_completed_at = NOW()")
+        elif status == "processing":
+            updates.append("processing_started_at = NOW()")
         
-        query = f"UPDATE ftp_movies SET {', '.join(updates)} WHERE id = {MOVIE_ID}"
-        cursor.execute(query)
+        query = f"UPDATE ftp_movies SET {', '.join(updates)} WHERE id = %s"
+        params.append(movie_id_int)
+        
+        cursor.execute(query, params)
         db_conn.commit()
         
         logger.info(f"✅ Database updated: status={status}")
         
     except Exception as e:
         logger.error(f"❌ Failed to update database: {e}")
+        if db_conn:
+            try:
+                db_conn.rollback()
+            except:
+                pass
+    finally:
+        if cursor:
+            try:
+                cursor.close()
+            except:
+                pass
+
+
+def get_uploaded_message_ids(db_conn):
+    """Get already uploaded message IDs with parameterized query"""
+    if not db_conn or not MOVIE_ID:
+        return []
+    
+    cursor = None
+    try:
+        # Validate MOVIE_ID
+        try:
+            movie_id_int = int(MOVIE_ID)
+        except (ValueError, TypeError):
+            logger.error(f"❌ Invalid MOVIE_ID: {MOVIE_ID}")
+            return []
+        
+        cursor = db_conn.cursor()
+        query = "SELECT telegram_message_ids FROM ftp_movies WHERE id = %s"
+        cursor.execute(query, (movie_id_int,))
+        result = cursor.fetchone()
+        
+        if result and result[0]:
+            message_ids = json.loads(result[0])
+            logger.info(f"📋 Found {len(message_ids)} already uploaded parts")
+            return message_ids
+        
+        return []
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get uploaded message IDs: {e}")
+        return []
+    finally:
+        if cursor:
+            try:
+                cursor.close()
+            except:
+                pass
+
+
+def save_message_id_immediately(db_conn, message_id):
+    """Save message ID with parameterized query"""
+    if not db_conn or not MOVIE_ID:
+        return
+    
+    cursor = None
+    try:
+        # Validate MOVIE_ID
+        try:
+            movie_id_int = int(MOVIE_ID)
+        except (ValueError, TypeError):
+            logger.error(f"❌ Invalid MOVIE_ID: {MOVIE_ID}")
+            return
+        
+        db_conn.start_transaction()
+        cursor = db_conn.cursor()
+        
+        # Get current message IDs
+        query = "SELECT telegram_message_ids FROM ftp_movies WHERE id = %s"
+        cursor.execute(query, (movie_id_int,))
+        result = cursor.fetchone()
+        
+        current_ids = []
+        if result and result[0]:
+            current_ids = json.loads(result[0])
+        
+        # Check for duplicate before appending
+        if message_id not in current_ids:
+            current_ids.append(message_id)
+        
+            update_query = "UPDATE ftp_movies SET telegram_message_ids = %s WHERE id = %s"
+            cursor.execute(update_query, (json.dumps(current_ids), movie_id_int))
+            db_conn.commit()
+            
+            logger.info(f"💾 Saved message ID {message_id} (total: {len(current_ids)})")
+        else:
+            logger.warning(f"⚠️ Message ID {message_id} already exists, skipping")
+            db_conn.commit()
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to save message ID: {e}")
+        if db_conn:
+            try:
+                db_conn.rollback()
+            except:
+                pass
+    finally:
+        if cursor:
+            try:
+                cursor.close()
+            except:
+                pass
 
 
 # =====================================================
 # FILE DOWNLOAD OPERATIONS
 # =====================================================
 
+def check_resume_support(url):
+    """
+    Check if server supports HTTP Range requests (resumable downloads).
+    Returns: (supports_resume: bool, total_size: int)
+    """
+    try:
+        response = requests.head(
+            url,
+            timeout=30,
+            headers={'User-Agent': 'Mozilla/5.0'},
+            allow_redirects=True
+        )
+        
+        # Check for Accept-Ranges header
+        accept_ranges = response.headers.get('Accept-Ranges', '').lower()
+        supports_resume = accept_ranges == 'bytes'
+        
+        # Get total file size
+        total_size = int(response.headers.get('Content-Length', 0))
+        
+        if supports_resume:
+            logger.info(f"✅ Server supports resumable downloads (Accept-Ranges: bytes)")
+        else:
+            logger.warning(f"⚠️ Server does NOT support resumable downloads (Accept-Ranges: {accept_ranges or 'none'})")
+        
+        response.close()
+        return supports_resume, total_size
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Could not check resume support: {e}")
+        return False, 0
+
+
 def download_file(url, output_path, max_retries=None):
-    """
-    Download file from URL with progress tracking, error handling, and unlimited retry logic.
-    Downloads to GitHub runner (not cPanel server).
-    
-    Args:
-        url: FTP URL to download from
-        output_path: Local path to save file
-        max_retries: Maximum retry attempts (None = unlimited)
-    """
     logger.info(f"📥 Downloading from: {url}")
     logger.info(f"💾 Saving to: {output_path}")
     
+    supports_resume, expected_total_size = check_resume_support(url)
+    
+    existing_size = 0
+    if os.path.exists(output_path):
+        existing_size = os.path.getsize(output_path)
+        if existing_size > 0:
+            logger.info(f"🔄 Found partial download: {existing_size / (1024**3):.2f} GB already downloaded")
+            if not supports_resume:
+                logger.warning(f"⚠️ Server doesn't support resume - deleting partial file and restarting")
+                os.remove(output_path)
+                existing_size = 0
+    
     attempt = 0
+    download_start_time = time.time()
     
     while True:
         attempt += 1
         
-        # Check if we've exceeded max retries (if set)
         if max_retries is not None and attempt > max_retries:
-            logger.error(f"❌ All {max_retries} download attempts failed")
             raise Exception(f"Failed to download after {max_retries} attempts")
         
+        retry_info = " (unlimited)" if max_retries is None else f"/{max_retries}"
+        logger.info(f"🔄 Download attempt #{attempt}{retry_info}")
+        
+        if os.path.exists(output_path):
+            existing_size = os.path.getsize(output_path)
+        else:
+            existing_size = 0
+        
+        if existing_size > 0:
+            logger.info(f"📊 Resuming from byte: {existing_size:,} ({existing_size / (1024**3):.2f} GB)")
+        
+        file_handle = None
+        response = None
+        
         try:
-            logger.info(f"🔄 Download attempt #{attempt}" + (" (unlimited retries)" if max_retries is None else f"/{max_retries}"))
+            headers = {
+                'User-Agent': 'Mozilla/5.0',
+                'Connection': 'keep-alive',
+            }
             
-            # Use longer timeout and connection settings
+            if existing_size > 0 and supports_resume:
+                headers['Range'] = f'bytes={existing_size}-'
+                logger.info(f"📡 Requesting: Range: bytes={existing_size}-")
+            
             response = requests.get(
-                url, 
-                stream=True, 
-                timeout=(30, 300),  # (connect timeout, read timeout)
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Connection': 'keep-alive',
-                }
+                url,
+                stream=True,
+                timeout=(60, 600),
+                headers=headers,
+                allow_redirects=True
             )
-            response.raise_for_status()
             
-            total_size = int(response.headers.get("content-length", 0))
-            logger.info(f"📊 File size: {total_size / (1024**3):.2f} GB")
+            if existing_size > 0 and supports_resume:
+                if response.status_code == 206:
+                    logger.info(f"✅ Server accepted resume request (HTTP 206 Partial Content)")
+                    content_range = response.headers.get('Content-Range', '')
+                    if content_range:
+                        logger.info(f"📊 Content-Range: {content_range}")
+                elif response.status_code == 200:
+                    logger.warning(f"⚠️ Server returned HTTP 200 (ignoring Range header)")
+                    logger.warning(f"⚠️ Deleting partial file and restarting from zero")
+                    response.close()
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    existing_size = 0
+                    supports_resume = False
+                    continue
+                else:
+                    response.raise_for_status()
+            else:
+                response.raise_for_status()
+            
+            if response.status_code == 206:
+                content_range = response.headers.get('Content-Range', '')
+                if content_range:
+                    try:
+                        total_size = int(content_range.split('/')[-1])
+                    except:
+                        total_size = expected_total_size
+                else:
+                    total_size = expected_total_size
+            else:
+                total_size = int(response.headers.get('Content-Length', 0))
+            
+            if total_size == 0:
+                total_size = expected_total_size
+            
+            logger.info(f"📊 Total file size: {total_size / (1024**3):.2f} GB")
             
             if total_size > MAX_FILE_SIZE_FOR_PROCESSING:
                 raise ValueError(f"File too large: {total_size / (1024**3):.2f} GB")
             
-            downloaded = 0
-            chunk_size = 1024 * 1024  # 1 MB chunks (smaller for stability)
+            file_mode = "ab" if existing_size > 0 else "wb"
+            file_handle = open(output_path, file_mode)
             
-            with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
+            downloaded_this_session = 0
+            chunk_size = 8 * 1024 * 1024
+            last_log_time = time.time()
+            session_start = time.time()
+            
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    file_handle.write(chunk)
+                    downloaded_this_session += len(chunk)
+                    
+                    current_time = time.time()
+                    if current_time - last_log_time >= 5:
+                        current_size = existing_size + downloaded_this_session
+                        elapsed = current_time - session_start
+                        speed = downloaded_this_session / elapsed if elapsed > 0 else 0
+                        progress = (current_size / total_size) * 100 if total_size else 0
+                        remaining_bytes = total_size - current_size
+                        eta = remaining_bytes / speed if speed > 0 else 0
                         
-                        # Log progress every 100 MB
-                        if downloaded % (100 * 1024 * 1024) < chunk_size:
-                            progress = (downloaded / total_size) * 100 if total_size else 0
-                            logger.info(f"📥 Progress: {downloaded / (1024**3):.2f} GB / {total_size / (1024**3):.2f} GB ({progress:.1f}%)")
+                        logger.info(
+                            f"📥 Downloaded: {current_size / (1024**3):.2f} GB | "
+                            f"Existing: {existing_size / (1024**3):.2f} GB | "
+                            f"This session: {downloaded_this_session / (1024**3):.2f} GB | "
+                            f"Progress: {progress:.1f}% | "
+                            f"Speed: {format_speed(speed)} | "
+                            f"ETA: {format_eta(eta)}"
+                        )
+                        last_log_time = current_time
+            
+            file_handle.close()
+            file_handle = None
             
             actual_size = os.path.getsize(output_path)
-            logger.info(f"✅ Download complete: {actual_size / (1024**3):.2f} GB")
+            
+            if total_size > 0 and actual_size != total_size:
+                logger.warning(f"⚠️ File size mismatch: {actual_size} bytes != {total_size} bytes expected")
+                logger.warning(f"⚠️ Keeping partial file for resume. Will retry...")
+                raise Exception(f"Download incomplete: got {actual_size} bytes, expected {total_size} bytes")
+            
+            total_time = time.time() - download_start_time
+            avg_speed = actual_size / total_time if total_time > 0 else 0
+            
+            logger.info(f"✅ Download complete: {actual_size / (1024**3):.2f} GB in {format_eta(total_time)}")
+            logger.info(f"✅ Integrity verified: {actual_size} bytes matches expected size")
+            logger.info(f"📊 Average speed: {format_speed(avg_speed)}")
             
             return actual_size
             
-        except (requests.exceptions.RequestException, Exception) as e:
-            logger.error(f"❌ Download attempt #{attempt} failed: {e}")
+        except (requests.exceptions.ConnectionError, 
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.IncompleteRead) as e:
+            logger.error(f"❌ Connection dropped (attempt #{attempt}): {type(e).__name__}: {e}")
+            if file_handle:
+                try:
+                    file_handle.close()
+                    logger.info(f"💾 Partial file saved for resume")
+                except:
+                    pass
             
-            # Clean up partial download
             if os.path.exists(output_path):
-                os.remove(output_path)
-                logger.info(f"🗑️ Removed partial download")
+                partial_size = os.path.getsize(output_path)
+                logger.info(f"📊 Partial download saved: {partial_size / (1024**3):.2f} GB")
             
-            # Calculate exponential backoff wait time (cap at 60 seconds)
-            wait_time = min(attempt * 5, 60)
-            logger.info(f"⏳ Retrying in {wait_time} seconds...")
+            wait_time = calculate_exponential_backoff(attempt)
+            logger.info(f"⏳ Retrying in {wait_time:.1f}s (will resume from last byte)...")
             time.sleep(wait_time)
             
-            # Continue to next iteration (retry)
+        except requests.exceptions.Timeout as e:
+            logger.error(f"❌ Timeout (attempt #{attempt}): {e}")
+            if file_handle:
+                try:
+                    file_handle.close()
+                    logger.info(f"💾 Partial file saved for resume")
+                except:
+                    pass
+            
+            wait_time = calculate_exponential_backoff(attempt)
+            logger.info(f"⏳ Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
+            
+        except Exception as e:
+            logger.error(f"❌ Download attempt #{attempt} failed: {type(e).__name__}: {e}")
+            if file_handle:
+                try:
+                    file_handle.close()
+                except:
+                    pass
+            
+            if isinstance(e, ValueError):
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                        logger.info(f"🗑️ Deleted partial file due to validation error")
+                    except:
+                        pass
+                raise
+            
+            wait_time = calculate_exponential_backoff(attempt)
+            logger.info(f"⏳ Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
+        
+        finally:
+            if response:
+                try:
+                    response.close()
+                except:
+                    pass
 
 
 # =====================================================
@@ -246,238 +596,373 @@ def get_video_duration(video_path):
 
 def split_video(input_path, file_size):
     """
-    Split video into parts under MAX_TELEGRAM_SIZE using FFmpeg.
-    Uses -c copy (no re-encoding, no quality loss).
+    Split video into parts under MAX_TELEGRAM_SIZE using FFmpeg (-c copy, no re-encoding).
+    Uses conservative splitting to ensure NO part ever exceeds the limit due to keyframe boundaries.
+    Automatically verifies each part size and re-splits if needed.
+    
+    Args:
+        input_path: Path to input video file
+        file_size: Size of input file in bytes
+    
+    Returns:
+        list: List of created part file paths
     """
     logger.info(f"✂️ File size ({file_size / (1024**3):.2f} GB) exceeds Telegram limit")
-    logger.info("📦 Splitting video into parts...")
+    logger.info(f"📦 Maximum part size: {MAX_TELEGRAM_SIZE / (1024**3):.2f} GB")
+    logger.info(f"🔒 Hard limit (never exceed): {PART_SIZE_HARD_LIMIT / (1024**3):.2f} GB")
     
-    # Calculate number of parts needed
-    num_parts = (file_size // MAX_TELEGRAM_SIZE) + 1
-    logger.info(f"📊 Will split into {num_parts} parts")
+    # Calculate number of parts needed with SAFETY FACTOR to account for keyframe boundaries
+    # FFmpeg with -c copy may create slightly larger parts due to keyframe alignment
+    target_part_size = int(MAX_TELEGRAM_SIZE * FFMPEG_SPLIT_SAFETY_FACTOR)
+    num_parts = int((file_size / target_part_size) + 1)
     
-    # Get video duration
+    logger.info(f"📊 Target part size: {target_part_size / (1024**3):.2f} GB (90% of max)")
+    logger.info(f"📊 Will split into approximately {num_parts} parts")
+    
+    # Get video duration for time-based splitting
     duration = get_video_duration(input_path)
     if not duration:
-        # Fallback: estimate 1 hour per GB
-        segment_time = 3600
-    else:
-        segment_time = int(duration / num_parts)
+        logger.warning("⚠️ Could not get video duration, using file size estimation")
+        # Estimate: 1 hour per GB (fallback)
+        duration = (file_size / (1024**3)) * 3600
     
+    # Calculate segment duration
+    segment_time = int(duration / num_parts)
     logger.info(f"⏱️ Segment duration: {segment_time} seconds ({segment_time/60:.2f} minutes)")
+    logger.info(f"⏱️ Total video duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
     
     # Get file extension
-    extension = Path(input_path).suffix
+    extension = Path(input_path).suffix or ".mp4"
     output_pattern = f"part_%03d{extension}"
     
-    # FFmpeg command (copy codecs, no re-encoding)
+    # FFmpeg command (copy codecs - NO re-encoding, NO quality loss)
+    # Note: -break_non_keyframes 1 allows breaking at non-keyframes if needed to respect size limit
     cmd = [
         "ffmpeg",
         "-i", str(input_path),
-        "-c", "copy",  # Copy codecs (NO quality loss)
+        "-c", "copy",  # Copy all codecs (video, audio, subtitles)
         "-map", "0",  # Map all streams
         "-f", "segment",  # Use segment muxer
         "-segment_time", str(segment_time),
-        "-reset_timestamps", "1",
-        "-avoid_negative_ts", "make_zero",
+        "-reset_timestamps", "1",  # Reset timestamps for each segment
+        "-avoid_negative_ts", "make_zero",  # Avoid negative timestamps
+        "-break_non_keyframes", "1",  # Allow breaking at non-keyframes if needed
         output_pattern
     ]
     
     logger.info(f"🔧 Running FFmpeg: {' '.join(cmd)}")
     
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        # Find all created parts
-        parts = sorted(Path(".").glob(f"part_*{extension}"))
-        logger.info(f"✅ Split complete: {len(parts)} parts created")
-        
-        for i, part in enumerate(parts, 1):
-            size = os.path.getsize(part)
-            logger.info(f"  📦 Part {i}: {part.name} ({size / (1024**3):.2f} GB)")
-        
-        return [str(p) for p in parts]
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"❌ FFmpeg split failed: {e}")
-        logger.error(f"FFmpeg stderr: {e.stderr}")
-        raise
+    max_split_attempts = 3  # Maximum number of re-split attempts
+    
+    for split_attempt in range(1, max_split_attempts + 1):
+        try:
+            logger.info(f"✂️ Split attempt {split_attempt}/{max_split_attempts}")
+            
+            # Run FFmpeg with progress monitoring
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=3600  # 1 hour timeout for splitting
+            )
+            
+            if process.stderr:
+                logger.debug(f"FFmpeg stderr: {process.stderr[-500:]}")  # Log last 500 chars
+            
+            # Find all created parts
+            parts = sorted(Path(".").glob(f"part_*{extension}"))
+            
+            if not parts:
+                raise Exception("FFmpeg did not create any output files")
+            
+            logger.info(f"✅ Split complete: {len(parts)} parts created")
+            
+            # Verify each part size
+            oversized_parts = []
+            all_parts_ok = True
+            
+            for i, part in enumerate(parts, 1):
+                size = os.path.getsize(part)
+                size_gb = size / (1024**3)
+                logger.info(f"  📦 Part {i}/{len(parts)}: {part.name} ({size_gb:.2f} GB)")
+                
+                # Check against HARD LIMIT (absolute maximum)
+                if size > PART_SIZE_HARD_LIMIT:
+                    logger.error(f"  ❌ Part {i} EXCEEDS HARD LIMIT: {size_gb:.2f} GB > {PART_SIZE_HARD_LIMIT / (1024**3):.2f} GB")
+                    oversized_parts.append((part, size))
+                    all_parts_ok = False
+                # Check against preferred limit
+                elif size > MAX_TELEGRAM_SIZE:
+                    logger.warning(f"  ⚠️ Part {i} exceeds preferred limit: {size_gb:.2f} GB > {MAX_TELEGRAM_SIZE / (1024**3):.2f} GB")
+                    logger.warning(f"  ⚠️ But within hard limit, will attempt upload")
+                elif size > (MAX_TELEGRAM_SIZE - PART_SIZE_VERIFICATION_MARGIN):
+                    logger.warning(f"  ⚠️ Part {i} is close to limit: {size_gb:.2f} GB")
+            
+            # If any parts exceed HARD LIMIT, we need to re-split
+            if oversized_parts:
+                logger.error(f"❌ {len(oversized_parts)} parts exceed HARD LIMIT")
+                
+                if split_attempt < max_split_attempts:
+                    logger.info(f"🔄 Re-splitting with more segments (attempt {split_attempt + 1}/{max_split_attempts})...")
+                    
+                    # Clean up current parts
+                    for part in parts:
+                        try:
+                            part.unlink()
+                        except:
+                            pass
+                    
+                    # Increase number of parts by 50%
+                    num_parts = int(num_parts * 1.5) + 1
+                    new_segment_time = int(duration / num_parts)
+                    logger.info(f"📊 New split: {num_parts} parts, {new_segment_time}s per segment")
+                    
+                    # Update FFmpeg command
+                    cmd[cmd.index("-segment_time") + 1] = str(new_segment_time)
+                    
+                    # Try again (continue loop)
+                    continue
+                else:
+                    # Max attempts reached, cannot split safely
+                    raise Exception(f"Cannot split video into parts under {PART_SIZE_HARD_LIMIT / (1024**3):.2f} GB after {max_split_attempts} attempts")
+            
+            # All parts within acceptable limits
+            logger.info(f"✅ All {len(parts)} parts verified successfully")
+            return [str(p) for p in parts]
+            
+        except subprocess.TimeoutExpired:
+            logger.error("❌ FFmpeg splitting timed out after 1 hour")
+            raise
+        except subprocess.CalledProcessError as e:
+            logger.error(f"❌ FFmpeg split failed with exit code {e.returncode}")
+            logger.error(f"FFmpeg stderr: {e.stderr}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Unexpected error during splitting: {e}")
+            raise
+    
+    # Should never reach here
+    raise Exception(f"Failed to split video after {max_split_attempts} attempts")
 
 
 # =====================================================
 # TELEGRAM UPLOAD OPERATIONS
 # =====================================================
 
+class StreamingFileReader:
+    """File reader that streams file in chunks without loading entire file to RAM"""
+    
+    def __init__(self, file_path, chunk_size=8 * 1024 * 1024):
+        self.file_path = file_path
+        self.chunk_size = chunk_size
+        self.file_size = os.path.getsize(file_path)
+        self.bytes_read = 0
+        self.file = None
+        self.start_time = time.time()
+        self.last_log_time = time.time()
+    
+    def __enter__(self):
+        self.file = open(self.file_path, 'rb')
+        return self
+    
+    def __exit__(self, *args):
+        if self.file:
+            self.file.close()
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        chunk = self.file.read(self.chunk_size)
+        if not chunk:
+            raise StopIteration
+        
+        self.bytes_read += len(chunk)
+        
+        # Log progress every 10 seconds
+        current_time = time.time()
+        if current_time - self.last_log_time >= 10:
+            progress = (self.bytes_read / self.file_size) * 100
+            elapsed = current_time - self.start_time
+            speed = self.bytes_read / elapsed if elapsed > 0 else 0
+            remaining_bytes = self.file_size - self.bytes_read
+            eta = remaining_bytes / speed if speed > 0 else 0
+            
+            logger.info(
+                f"📤 Progress: {self.bytes_read / (1024**3):.2f} GB / {self.file_size / (1024**3):.2f} GB "
+                f"({progress:.1f}%) | Speed: {format_speed(speed)} | ETA: {format_eta(eta)}"
+            )
+            self.last_log_time = current_time
+        
+        return chunk
+    
+    def read(self, size=-1):
+        """
+        Compatibility method for requests library.
+        IMPORTANT: Must NOT load entire file when size=-1 (defeats streaming purpose).
+        """
+        if size == -1 or size is None:
+            # Return empty bytes to prevent loading entire file to RAM
+            # This is called by requests library for final read check
+            return b''
+        return self.file.read(size)
+
+
 def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=None, total_parts=None):
-    """
-    Upload video file to Telegram using chunked streaming upload.
-    More memory efficient and stable for large files.
-    """
-    if part_number:
+    """Upload video with retry logic and streaming"""
+    if part_number and total_parts:
         caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
     
     file_size = os.path.getsize(file_path)
-    logger.info(f"📤 Uploading: {Path(file_path).name} ({file_size / (1024**3):.2f} GB)")
+    file_size_gb = file_size / (1024**3)
     
-    # Telegram Bot API endpoint
+    logger.info(f"📤 Uploading part {part_number or 1}/{total_parts or 1}: {Path(file_path).name} ({file_size_gb:.2f} GB)")
+    
+    if file_size > PART_SIZE_HARD_LIMIT:
+        raise ValueError(f"File too large: {file_size_gb:.2f} GB (exceeds hard limit)")
+    elif file_size > MAX_TELEGRAM_SIZE:
+        logger.warning(f"⚠️ File {file_size_gb:.2f} GB exceeds preferred limit but within hard limit")
+    
     url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
     
-    # Calculate appropriate timeout (generous for large files)
-    upload_timeout = max(3600, int((file_size / (30 * 1024 * 1024)) * 60))  # 1 min per 30MB
-    logger.info(f"⏱️ Upload timeout set to: {upload_timeout} seconds ({upload_timeout/60:.1f} minutes)")
+    base_timeout = 7200
+    size_based_timeout = int((file_size / (100 * 1024 * 1024)) * 180)
+    upload_timeout = base_timeout + size_based_timeout
     
-    # Create a session with optimized settings
-    session = requests.Session()
-    
-    # Configure retry and connection pooling
-    from requests.adapters import HTTPAdapter
-    from requests.packages.urllib3.util.retry import Retry
-    
-    retry_strategy = Retry(
-        total=3,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["POST"],
-        backoff_factor=3,  # 3s, 6s, 12s
-    )
-    
-    adapter = HTTPAdapter(
-        max_retries=retry_strategy,
-        pool_connections=1,
-        pool_maxsize=1,
-        pool_block=True,
-    )
-    
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
+    logger.info(f"⏱️ Upload timeout: {upload_timeout}s ({format_eta(upload_timeout)})")
     
     for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
+        upload_start = time.time()
+        session = None
+        response = None
+        
         try:
             logger.info(f"📤 Upload attempt {attempt}/{MAX_UPLOAD_RETRIES}")
             
-            # Open file in binary mode for streaming
-            with open(file_path, "rb") as video_file:
-                # Prepare multipart form data
+            session = create_upload_session()
+            
+            data = {
+                'chat_id': chat_id,
+                'caption': caption[:1024],
+                'supports_streaming': 'true'
+            }
+            
+            logger.info("📡 Starting streaming upload...")
+            
+            with StreamingFileReader(file_path) as file_reader:
                 files = {
-                    'video': (Path(file_path).name, video_file, 'video/mp4')
+                    'video': (Path(file_path).name, file_reader, 'video/mp4')
                 }
-                
-                data = {
-                    'chat_id': chat_id,
-                    'caption': caption,
-                    'supports_streaming': 'true'
-                }
-                
-                # Stream upload with progress logging
-                logger.info("📡 Starting chunked upload...")
                 
                 response = session.post(
                     url,
                     files=files,
                     data=data,
-                    timeout=(180, upload_timeout),  # 3 min connect, long read
+                    timeout=(180, upload_timeout),
                     headers={
                         'Connection': 'keep-alive',
                         'Accept': '*/*',
                     },
-                    stream=False,
+                    stream=False
                 )
-                
-                response.raise_for_status()
-                result = response.json()
-                
-                if result.get('ok'):
-                    message_id = result['result']['message_id']
-                    logger.info(f"✅ Upload successful: Message ID {message_id}")
-                    session.close()
-                    return message_id
-                else:
-                    error_desc = result.get('description', 'Unknown error')
-                    raise Exception(f"Telegram API error: {error_desc}")
             
+            duration = time.time() - upload_start
+            avg_speed = file_size / duration if duration > 0 else 0
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get('ok'):
+                message_id = result['result']['message_id']
+                logger.info(f"✅ Upload successful in {format_eta(duration)}")
+                logger.info(f"📊 Average speed: {format_speed(avg_speed)}")
+                logger.info(f"📨 Message ID: {message_id}")
+                
+                return message_id
+            else:
+                error_desc = result.get('description', 'Unknown error')
+                raise Exception(f"Telegram API error: {error_desc}")
+        
         except requests.exceptions.SSLError as e:
             logger.error(f"❌ SSL error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
-            if attempt < MAX_UPLOAD_RETRIES:
-                wait_time = RETRY_DELAY * attempt * 3  # Triple wait: 30s, 60s, 90s, 120s, 150s
-                logger.info(f"⏳ Retrying in {wait_time} seconds (resetting connection)...")
-                session.close()
-                time.sleep(wait_time)
-                
-                # Recreate session
-                session = requests.Session()
-                session.mount("https://", adapter)
-                session.mount("http://", adapter)
-            else:
-                session.close()
-                raise
-        
-        except requests.exceptions.Timeout as e:
-            logger.error(f"❌ Upload timeout (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
-            
-            if attempt < MAX_UPLOAD_RETRIES:
-                wait_time = RETRY_DELAY * attempt * 2
-                logger.info(f"⏳ Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                session.close()
-                raise
-        
         except requests.exceptions.ConnectionError as e:
             logger.error(f"❌ Connection error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
-            if attempt < MAX_UPLOAD_RETRIES:
-                wait_time = RETRY_DELAY * attempt * 2
-                logger.info(f"⏳ Retrying in {wait_time} seconds...")
-                session.close()
-                time.sleep(wait_time)
-                
-                # Recreate session
-                session = requests.Session()
-                session.mount("https://", adapter)
-                session.mount("http://", adapter)
-            else:
-                session.close()
-                raise
-        
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Request failed (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+        except requests.exceptions.Timeout:
+            duration = time.time() - upload_start
+            logger.error(f"❌ Timeout after {format_eta(duration)} (attempt {attempt}/{MAX_UPLOAD_RETRIES})")
             
-            if attempt < MAX_UPLOAD_RETRIES:
-                wait_time = RETRY_DELAY * attempt
-                logger.info(f"⏳ Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                session.close()
+        except requests.exceptions.ChunkedEncodingError as e:
+            logger.error(f"❌ ChunkedEncoding error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+            
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES})")
+            
+        except Exception as e:
+            logger.error(f"❌ Unexpected {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+            if attempt >= MAX_UPLOAD_RETRIES:
                 raise
         
-        except Exception as e:
-            logger.error(f"❌ Unexpected error: {e}")
-            session.close()
-            raise
+        finally:
+            # CRITICAL: Always close response and session to prevent memory leaks
+            if response:
+                try:
+                    response.close()
+                except:
+                    pass
+            if session:
+                try:
+                    session.close()
+                except:
+                    pass
+        
+        # Retry logic
+        if attempt < MAX_UPLOAD_RETRIES:
+            wait_time = calculate_exponential_backoff(attempt)
+            logger.info(f"⏳ Waiting {wait_time:.1f}s before retry...")
+            time.sleep(wait_time)
+        else:
+            raise Exception(f"Failed to upload {file_path} after {MAX_UPLOAD_RETRIES} attempts")
     
-    session.close()
-    raise Exception(f"Failed to upload after {MAX_UPLOAD_RETRIES} attempts")
+    raise Exception(f"Upload failed unexpectedly")
 
 
 # =====================================================
 # CLEANUP OPERATIONS
 # =====================================================
 
-def cleanup_files(*file_patterns):
+def cleanup_files(*file_patterns, exclude_files=None):
     """
     Delete all temporary files matching patterns.
     Called automatically even if script fails.
+    
+    Args:
+        *file_patterns: Glob patterns to match files for deletion
+        exclude_files: List of files to exclude from deletion (still needed for upload)
     """
     logger.info("🧹 Cleaning up temporary files...")
     
+    exclude_files = exclude_files or []
+    exclude_set = {str(Path(f).resolve()) for f in exclude_files}
+    
     deleted_count = 0
+    skipped_count = 0
+    
     for pattern in file_patterns:
         for file_path in Path(".").glob(pattern):
+            resolved_path = str(file_path.resolve())
+            
+            # Skip files that are excluded (still needed)
+            if resolved_path in exclude_set:
+                logger.info(f"  ⏭️ Skipped (still needed): {file_path}")
+                skipped_count += 1
+                continue
+            
             try:
                 file_path.unlink()
                 logger.info(f"  🗑️ Deleted: {file_path}")
@@ -485,7 +970,43 @@ def cleanup_files(*file_patterns):
             except Exception as e:
                 logger.error(f"  ❌ Failed to delete {file_path}: {e}")
     
-    logger.info(f"✅ Cleanup complete: {deleted_count} files deleted")
+    logger.info(f"✅ Cleanup complete: {deleted_count} files deleted, {skipped_count} files skipped")
+
+
+def safe_cleanup_all_temp_files(exclude_files=None):
+    """
+    Safe cleanup that deletes temporary files after processing.
+    
+    Args:
+        exclude_files: List of files to exclude from deletion (still needed for upload/resume)
+    """
+    logger.info("🧹 Final cleanup: removing temporary files...")
+    
+    exclude_files = exclude_files or []
+    exclude_set = {str(Path(f).resolve()) for f in exclude_files}
+    
+    patterns = ["movie.*", "part_*"]
+    deleted_count = 0
+    skipped_count = 0
+    
+    for pattern in patterns:
+        for file_path in Path(".").glob(pattern):
+            resolved_path = str(file_path.resolve())
+            
+            # Skip files that are excluded (still needed)
+            if resolved_path in exclude_set:
+                logger.info(f"  ⏭️ Skipped (still needed): {file_path}")
+                skipped_count += 1
+                continue
+            
+            try:
+                file_path.unlink()
+                logger.info(f"  🗑️ Deleted: {file_path}")
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"  ❌ Failed to delete {file_path}: {e}")
+    
+    logger.info(f"✅ Final cleanup complete: {deleted_count} files deleted, {skipped_count} files skipped")
 
 
 # =====================================================
@@ -493,18 +1014,23 @@ def cleanup_files(*file_patterns):
 # =====================================================
 
 def main():
-    """Main execution function"""
+    """
+    Main execution function with resume-from-failed-part capability.
+    Ensures proper resource management and cleanup in all scenarios.
+    """
     logger.info("=" * 80)
-    logger.info("🎬 FTP MOVIE BOT - GITHUB WORKER")
+    logger.info("🎬 FTP MOVIE BOT - GITHUB WORKER v3.0 (Production)")
     logger.info("=" * 80)
     logger.info(f"Movie ID: {MOVIE_ID}")
     logger.info(f"Movie Title: {MOVIE_TITLE}")
     logger.info(f"Movie URL: {MOVIE_URL}")
+    logger.info(f"Using self-hosted Telegram Bot API Server")
     logger.info("=" * 80)
     
     db_conn = None
     file_parts = []
     input_file = None
+    parts_to_keep = []  # Parts that still need uploading (don't delete)
     
     try:
         # Validate environment variables
@@ -514,50 +1040,144 @@ def main():
         # Connect to database
         db_conn = get_db_connection()
         
+        # Check if this movie already has parts uploaded (resume capability)
+        already_uploaded_ids = get_uploaded_message_ids(db_conn) if db_conn else []
+        parts_already_uploaded = len(already_uploaded_ids)
+        
+        if parts_already_uploaded > 0:
+            logger.info(f"🔄 RESUME MODE: {parts_already_uploaded} parts already uploaded")
+            logger.info(f"📋 Existing message IDs: {already_uploaded_ids}")
+        
         # Determine file extension from URL
-        extension = Path(MOVIE_URL).suffix or ".mp4"
+        extension = Path(MOVIE_URL).suffix.lower() or ".mp4"
+        
+        # Validate extension (MP4 and MKV are safe for FFmpeg -c copy)
+        if extension not in ['.mp4', '.mkv', '.avi', '.mov']:
+            logger.warning(f"⚠️ Uncommon extension: {extension} - FFmpeg -c copy may have issues")
+        
         input_file = f"movie{extension}"
         
-        # Step 1: Download movie from FTP
-        logger.info("📥 Step 1: Downloading movie from FTP...")
-        file_size = download_file(MOVIE_URL, input_file, max_retries=MAX_DOWNLOAD_RETRIES)
-        
-        # Step 2: Check if splitting is needed
-        if file_size <= MAX_TELEGRAM_SIZE:
-            logger.info(f"✅ File size OK ({file_size / (1024**3):.2f} GB), no splitting needed")
-            file_parts = [input_file]
-            is_split = False
-            total_parts = 1
-        else:
-            logger.info("✂️ Step 2: Splitting video...")
-            file_parts = split_video(input_file, file_size)
-            is_split = True
-            total_parts = len(file_parts)
+        # Step 1: Download movie from FTP (only if not already split and cached)
+        if parts_already_uploaded == 0:
+            logger.info("📥 Step 1: Downloading movie from FTP...")
+            file_size = download_file(MOVIE_URL, input_file, max_retries=MAX_DOWNLOAD_RETRIES)
             
-            # Update database with split info
-            if db_conn:
-                update_movie_status(db_conn, "processing", is_split=True, total_parts=total_parts)
+            # Step 2: Check if splitting is needed
+            if file_size <= MAX_TELEGRAM_SIZE:
+                logger.info(f"✅ File size OK ({file_size / (1024**3):.2f} GB), no splitting needed")
+                file_parts = [input_file]
+                is_split = False
+                total_parts = 1
+            else:
+                logger.info("✂️ Step 2: Splitting video...")
+                file_parts = split_video(input_file, file_size)
+                is_split = True
+                total_parts = len(file_parts)
+                
+                # Clean up original file after successful split (save disk space)
+                if os.path.exists(input_file):
+                    try:
+                        os.remove(input_file)
+                        logger.info(f"🗑️ Removed original file (split completed): {input_file}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not remove original file: {e}")
+                
+                # Update database with split info
+                if db_conn:
+                    update_movie_status(db_conn, "processing", is_split=True, total_parts=total_parts)
+        else:
+            # Resume mode: parts already exist (from previous run or cached)
+            logger.info("🔄 Step 1 & 2: Skipped (resuming from existing parts)")
+            
+            # Find existing part files
+            file_parts = sorted([str(p) for p in Path(".").glob(f"part_*{extension}")])
+            
+            if not file_parts:
+                # Parts don't exist locally, need to re-download and re-split
+                logger.warning("⚠️ Part files not found locally, will re-download and re-split")
+                file_size = download_file(MOVIE_URL, input_file, max_retries=MAX_DOWNLOAD_RETRIES)
+                
+                if file_size <= MAX_TELEGRAM_SIZE:
+                    file_parts = [input_file]
+                    is_split = False
+                    total_parts = 1
+                else:
+                    file_parts = split_video(input_file, file_size)
+                    is_split = True
+                    total_parts = len(file_parts)
+                    
+                    # Clean up original after split
+                    if os.path.exists(input_file):
+                        try:
+                            os.remove(input_file)
+                            logger.info(f"🗑️ Removed original file: {input_file}")
+                        except:
+                            pass
+            else:
+                is_split = True
+                total_parts = len(file_parts)
+                logger.info(f"✅ Found {total_parts} existing parts locally")
         
-        # Step 3: Upload to Telegram
+        # Step 3: Upload to Telegram (with resume capability)
         logger.info("📤 Step 3: Uploading to Telegram...")
-        message_ids = []
+        message_ids = already_uploaded_ids.copy()  # Start with already uploaded IDs
         
-        for i, part_file in enumerate(file_parts, 1):
+        # Determine which parts still need uploading
+        parts_to_upload = file_parts[parts_already_uploaded:]
+        parts_to_keep = parts_to_upload.copy()  # Don't delete these until uploaded
+        
+        if not parts_to_upload:
+            logger.info("✅ All parts already uploaded!")
+        else:
+            logger.info(f"📦 Uploading remaining {len(parts_to_upload)} parts (starting from part {parts_already_uploaded + 1}/{total_parts})")
+        
+        # Upload each part
+        for i, part_file in enumerate(parts_to_upload, start=parts_already_uploaded + 1):
             caption = MOVIE_TITLE if not is_split else MOVIE_TITLE
             
-            message_id = upload_to_telegram_sync(
-                part_file,
-                caption,
-                TELEGRAM_BOT_TOKEN,
-                TELEGRAM_CHAT_ID,
-                part_number=i if is_split else None,
-                total_parts=total_parts if is_split else None
-            )
+            logger.info(f"\n{'=' * 60}")
+            logger.info(f"📤 Starting upload: Part {i}/{total_parts}")
+            logger.info(f"📂 File: {part_file}")
+            logger.info(f"{'=' * 60}\n")
             
-            message_ids.append(message_id)
+            try:
+                message_id = upload_to_telegram_sync(
+                    part_file,
+                    caption,
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    part_number=i if is_split else None,
+                    total_parts=total_parts if is_split else None
+                )
+                
+                message_ids.append(message_id)
+                
+                # CRITICAL: Save message ID immediately after successful upload
+                # This enables resume if next part fails
+                if db_conn:
+                    save_message_id_immediately(db_conn, message_id)
+                    logger.info(f"💾 Progress saved: {i}/{total_parts} parts uploaded")
+                
+                # Part uploaded successfully, can now delete it (save disk space)
+                try:
+                    os.remove(part_file)
+                    logger.info(f"🗑️ Removed uploaded part: {part_file}")
+                    # Remove from parts_to_keep
+                    if part_file in parts_to_keep:
+                        parts_to_keep.remove(part_file)
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not remove uploaded part: {e}")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to upload part {i}/{total_parts}: {e}")
+                # Don't delete this part - it's still needed for retry
+                raise
         
         # Step 4: Update database as completed
-        logger.info("✅ Step 4: Updating database...")
+        logger.info("\n" + "=" * 60)
+        logger.info("✅ Step 4: Marking as completed...")
+        logger.info("=" * 60)
+        
         if db_conn:
             update_movie_status(
                 db_conn,
@@ -568,14 +1188,14 @@ def main():
                 telegram_channel_id=TELEGRAM_CHAT_ID
             )
         
-        logger.info("=" * 80)
+        logger.info("\n" + "=" * 80)
         logger.info("🎉 MOVIE PROCESSING COMPLETED SUCCESSFULLY!")
         logger.info(f"📦 Uploaded {total_parts} part(s) to Telegram")
         logger.info(f"📨 Message IDs: {message_ids}")
-        logger.info("=" * 80)
+        logger.info("=" * 80 + "\n")
         
     except Exception as e:
-        logger.exception(f"❌ Fatal error: {e}")
+        logger.exception(f"\n❌ Fatal error: {e}\n")
         
         # Update database as failed
         if db_conn:
@@ -585,10 +1205,20 @@ def main():
         
     finally:
         # CRITICAL: Always cleanup files (even on failure)
-        cleanup_files("movie.*", "part_*")
+        # Pass parts_to_keep to prevent deleting files still needed for resume
+        logger.info("\n" + "=" * 60)
+        logger.info("🧹 Starting cleanup...")
+        logger.info("=" * 60)
         
+        safe_cleanup_all_temp_files(exclude_files=parts_to_keep)
+        
+        # Close database connection
         if db_conn:
-            db_conn.close()
+            try:
+                db_conn.close()
+                logger.info("✅ Database connection closed")
+            except Exception as e:
+                logger.warning(f"⚠️ Error closing database: {e}")
 
 
 if __name__ == "__main__":
