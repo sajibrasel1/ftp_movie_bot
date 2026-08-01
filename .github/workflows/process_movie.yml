@@ -1,0 +1,115 @@
+name: Movie Splitter & Telegram Uploader
+
+# Triggered manually via GitHub API from cPanel
+on:
+  workflow_dispatch:
+    inputs:
+      movie_id:
+        description: 'Database movie ID'
+        required: true
+        type: string
+      movie_title:
+        description: 'Movie title'
+        required: true
+        type: string
+      movie_url:
+        description: 'FTP URL of movie file'
+        required: true
+        type: string
+
+jobs:
+  process-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours maximum
+    
+    steps:
+      # ============================================
+      # Step 1: Setup Environment
+      # ============================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+      
+      # ============================================
+      # Step 2: Display Workflow Info
+      # ============================================
+      - name: Display workflow information
+        run: |
+          echo "============================================"
+          echo "Movie Processing Workflow Started"
+          echo "============================================"
+          echo "Movie ID: ${{ github.event.inputs.movie_id }}"
+          echo "Movie Title: ${{ github.event.inputs.movie_title }}"
+          echo "Movie URL: ${{ github.event.inputs.movie_url }}"
+          echo "Runner: $(uname -a)"
+          echo "Disk Space Available:"
+          df -h
+          echo "Memory Available:"
+          free -h
+          echo "============================================"
+      
+      # ============================================
+      # Step 3: Process Movie
+      # ============================================
+      - name: Download, split, and upload movie
+        env:
+          MOVIE_ID: ${{ github.event.inputs.movie_id }}
+          MOVIE_TITLE: ${{ github.event.inputs.movie_title }}
+          MOVIE_URL: ${{ github.event.inputs.movie_url }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          python github_worker.py
+      
+      # ============================================
+      # Step 4: Cleanup (runs even if previous step fails)
+      # ============================================
+      - name: Cleanup temporary files
+        if: always()
+        run: |
+          echo "Cleaning up temporary files..."
+          rm -f movie.*
+          rm -f part_*.mp4
+          rm -f part_*.mkv
+          df -h
+          echo "Cleanup completed"
+      
+      # ============================================
+      # Step 5: Report Status
+      # ============================================
+      - name: Report completion
+        if: success()
+        run: |
+          echo "============================================"
+          echo "✅ Movie processing completed successfully"
+          echo "Movie: ${{ github.event.inputs.movie_title }}"
+          echo "============================================"
+      
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "============================================"
+          echo "❌ Movie processing failed"
+          echo "Movie: ${{ github.event.inputs.movie_title }}"
+          echo "Check logs above for error details"
+          echo "============================================"

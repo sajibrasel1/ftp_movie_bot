@@ -1,0 +1,18 @@
+# =====================================================
+# FTP Movie Bot - Python Dependencies
+# =====================================================
+
+# Telegram Bot API
+python-telegram-bot==20.7
+
+# HTTP Requests
+requests==2.31.0
+
+# HTML Parsing (for FTP directory listing)
+beautifulsoup4==4.12.2
+
+# MySQL Database Connector
+mysql-connector-python==8.2.0
+
+# Additional utilities
+lxml==4.9.3

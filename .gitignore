@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Logs
+logs/
+*.log
+
+# Database
+*.sql.backup
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.temp
+movie.*
+part_*.mp4
+part_*.mkv
+part_*.avi
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit these!)
+config_local.py
+.env
+secrets.json
+*.pem
+*.key
+set_env.sh
+
+# GitHub token file (if stored locally)
+github_token.txt
+telegram_token.txt
