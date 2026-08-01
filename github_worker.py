@@ -47,7 +47,7 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD")
 DB_NAME = os.environ.get("DB_NAME")
 
 # Processing limits
-MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB (safe buffer under 2GB limit)
+MAX_TELEGRAM_SIZE = 500_000_000  # 500 MB (safer threshold for stable uploads)
 MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 
 # Retry configuration
