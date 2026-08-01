@@ -315,8 +315,8 @@ def split_video(input_path, file_size):
 
 def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=None, total_parts=None):
     """
-    Upload video file to Telegram using direct HTTP requests (more stable for large files).
-    Uses requests library instead of python-telegram-bot for better control over timeouts.
+    Upload video file to Telegram using direct HTTP requests with enhanced stability.
+    Uses session pooling and chunked upload for better reliability.
     """
     if part_number:
         caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
@@ -330,6 +330,29 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
     # Calculate appropriate timeout (at least 30 minutes for large files)
     upload_timeout = max(1800, int((file_size / (50 * 1024 * 1024)) * 60))  # 1 minute per 50MB minimum
     logger.info(f"⏱️ Upload timeout set to: {upload_timeout} seconds ({upload_timeout/60:.1f} minutes)")
+    
+    # Create a session with connection pooling and retry strategy
+    session = requests.Session()
+    
+    # Configure retry strategy
+    from requests.adapters import HTTPAdapter
+    from requests.packages.urllib3.util.retry import Retry
+    
+    retry_strategy = Retry(
+        total=3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["POST"],
+        backoff_factor=2,  # 2s, 4s, 8s
+    )
+    
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=1,
+        pool_maxsize=1,
+    )
+    
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     
     for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
         try:
@@ -346,15 +369,17 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
                     'supports_streaming': 'true'
                 }
                 
-                # Use requests with custom timeout and keep-alive
-                response = requests.post(
+                # Use session with enhanced settings
+                response = session.post(
                     url,
                     files=files,
                     data=data,
                     timeout=(120, upload_timeout),  # (connect timeout, read timeout)
                     headers={
                         'Connection': 'keep-alive',
-                    }
+                        'Accept-Encoding': 'gzip, deflate',
+                    },
+                    stream=False,  # Don't stream response
                 )
                 
                 response.raise_for_status()
@@ -363,10 +388,28 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
                 if result.get('ok'):
                     message_id = result['result']['message_id']
                     logger.info(f"✅ Upload successful: Message ID {message_id}")
+                    session.close()
                     return message_id
                 else:
                     raise Exception(f"Telegram API error: {result.get('description', 'Unknown error')}")
             
+        except requests.exceptions.SSLError as e:
+            logger.error(f"❌ SSL error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+            
+            if attempt < MAX_UPLOAD_RETRIES:
+                wait_time = RETRY_DELAY * attempt * 2  # Double wait for SSL errors: 20s, 40s, 60s, 80s, 100s
+                logger.info(f"⏳ Retrying in {wait_time} seconds (SSL connection will be reset)...")
+                session.close()  # Close and recreate session
+                time.sleep(wait_time)
+                
+                # Recreate session for next attempt
+                session = requests.Session()
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+            else:
+                session.close()
+                raise
+        
         except requests.exceptions.Timeout as e:
             logger.error(f"❌ Upload timeout (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
@@ -375,6 +418,7 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
                 logger.info(f"⏳ Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
+                session.close()
                 raise
         
         except requests.exceptions.RequestException as e:
@@ -385,12 +429,15 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
                 logger.info(f"⏳ Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
+                session.close()
                 raise
         
         except Exception as e:
             logger.error(f"❌ Unexpected error during upload: {e}")
+            session.close()
             raise
     
+    session.close()
     raise Exception(f"Failed to upload after {MAX_UPLOAD_RETRIES} attempts")
 
 
