@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -49,14 +50,11 @@ GITHUB_WORKFLOW_FILE = "process_movie.yml"
 
 # FTP site configuration
 FTP_BASE_URL = "http://ftp.ctgfun.com"
-FTP_MOVIE_PATHS = [
-    "/Movies/",
-    "/Movies/2024/",
-    "/Movies/2025/",
-    "/Movies/2026/",
-    "/Movies/Hollywood/",
-    "/Movies/Bollywood/",
-]
+FTP_START_PATH = "/"  # Start from root and crawl everything recursively
+
+# Recursive crawling configuration
+MAX_RECURSION_DEPTH = 50  # Safety limit to prevent infinite loops (can be increased)
+CRAWL_DELAY_SECONDS = 0.5  # Delay between requests to avoid overloading server
 
 # Logging
 LOG_DIR = Path(__file__).parent / "logs"
@@ -197,7 +195,258 @@ def check_github_quota(cursor):
 # FTP SCRAPING FUNCTIONS
 # =====================================================
 
+# =====================================================
+# RECURSIVE FTP CRAWLING FUNCTIONS
+# =====================================================
+
 def parse_movie_title(filename):
+    """Extract movie title, year, quality from filename"""
+    # Remove extension
+    name = os.path.splitext(filename)[0]
+    
+    # Extract year
+    year_match = re.search(r"(19|20)\d{2}", name)
+    year = int(year_match.group()) if year_match else None
+    
+    # Extract quality
+    quality = None
+    quality_patterns = [
+        r"2160p|4K|UHD",
+        r"1080p|FullHD|FHD",
+        r"720p|HD",
+        r"480p|SD",
+        r"BluRay|BRRip|BDRip",
+        r"WEB-DL|WEBRip",
+        r"DVDRip|DVD",
+    ]
+    for pattern in quality_patterns:
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match:
+            quality = match.group()
+            break
+    
+    # Clean title (remove quality, year, etc.)
+    title = re.sub(r"(19|20)\d{2}", "", name)
+    title = re.sub(r"(2160p|4K|1080p|720p|480p|BluRay|WEB-DL|WEBRip|DVDRip|BRRip|BDRip)", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"[._-]+", " ", title)
+    title = title.strip()
+    
+    return {
+        "title": title,
+        "year": year,
+        "quality": quality,
+    }
+
+
+def parse_file_size(size_str):
+    """Convert size string to bytes"""
+    if not size_str:
+        return None
+    
+    size_str = size_str.strip().upper()
+    
+    # Extract number and unit
+    match = re.match(r"([\d.]+)\s*([KMGT]?B?)", size_str)
+    if not match:
+        return None
+    
+    number = float(match.group(1))
+    unit = match.group(2)
+    
+    multipliers = {
+        "B": 1,
+        "KB": 1024,
+        "MB": 1024**2,
+        "GB": 1024**3,
+        "TB": 1024**4,
+    }
+    
+    multiplier = multipliers.get(unit, 1)
+    return int(number * multiplier)
+
+
+def is_directory_link(href):
+    """Check if href represents a directory (ends with /)"""
+    return href.endswith("/")
+
+
+def is_parent_directory(href):
+    """Check if href is parent directory link"""
+    return href in ["../", "..", "Parent Directory"]
+
+
+def is_video_file(filename):
+    """Check if filename is a video file"""
+    video_extensions = [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"]
+    extension = os.path.splitext(filename.lower())[1]
+    return extension in video_extensions
+
+
+def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=None, all_movies=None):
+    """
+    Recursively crawl FTP directory structure and extract all video files.
+    
+    Args:
+        base_url: Base FTP URL (e.g., http://ftp.ctgfun.com)
+        current_path: Current directory path being crawled
+        depth: Current recursion depth
+        visited: Set of visited paths to avoid duplicates
+        all_movies: List to accumulate all found movies
+    
+    Returns:
+        List of movie dictionaries
+    """
+    # Initialize on first call
+    if visited is None:
+        visited = set()
+    if all_movies is None:
+        all_movies = []
+    
+    # Safety check: max recursion depth
+    if depth > MAX_RECURSION_DEPTH:
+        logger.warning(f"⚠️ Max recursion depth reached at: {current_path}")
+        return all_movies
+    
+    # Avoid revisiting same path
+    if current_path in visited:
+        return all_movies
+    visited.add(current_path)
+    
+    # Build full URL
+    full_url = base_url.rstrip("/") + current_path
+    
+    logger.info(f"{'  ' * depth}📂 Crawling [{depth}]: {current_path}")
+    
+    try:
+        # Add delay to avoid overloading server
+        if depth > 0:  # No delay for root
+            time.sleep(CRAWL_DELAY_SECONDS)
+        
+        response = requests.get(full_url, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Find all links in the directory listing
+        links = soup.find_all("a")
+        
+        directories = []
+        files = []
+        
+        for link in links:
+            href = link.get("href", "").strip()
+            
+            if not href:
+                continue
+            
+            # Skip parent directory links
+            if is_parent_directory(href):
+                continue
+            
+            # Skip absolute URLs (external links)
+            if href.startswith("http://") or href.startswith("https://"):
+                continue
+            
+            # Separate directories and files
+            if is_directory_link(href):
+                directories.append(href)
+            else:
+                files.append(link)
+        
+        # Process video files in current directory
+        for file_link in files:
+            href = file_link.get("href", "").strip()
+            filename = file_link.text.strip()
+            
+            # Check if it's a video file
+            if not is_video_file(filename):
+                continue
+            
+            # Get file size from adjacent cell (Apache directory listing format)
+            size_text = "Unknown"
+            size_bytes = None
+            
+            try:
+                parent_row = file_link.find_parent("tr")
+                if parent_row:
+                    cells = parent_row.find_all("td")
+                    if len(cells) >= 2:
+                        # Size is typically in the second or third column
+                        for cell in cells[1:]:
+                            text = cell.text.strip()
+                            if text and not text.startswith("20"):  # Skip dates
+                                size_text = text
+                                size_bytes = parse_file_size(text)
+                                break
+            except Exception as e:
+                logger.debug(f"Could not parse file size: {e}")
+            
+            # Skip very small files (< 100MB, likely samples/trailers)
+            if size_bytes and size_bytes < 100 * 1024 * 1024:
+                logger.debug(f"⏭️ Skipping small file: {filename} ({size_text})")
+                continue
+            
+            # Build full file URL
+            file_url = full_url.rstrip("/") + "/" + href
+            
+            # Parse movie metadata
+            metadata = parse_movie_title(filename)
+            
+            # Add to movies list
+            movie_data = {
+                "title": metadata["title"],
+                "url": file_url,
+                "size_bytes": size_bytes,
+                "size_readable": size_text,
+                "extension": os.path.splitext(filename)[1],
+                "quality": metadata["quality"],
+                "year": metadata["year"],
+                "directory": current_path,
+            }
+            
+            all_movies.append(movie_data)
+            logger.info(f"{'  ' * depth}  ✅ Found: {metadata['title']} ({size_text})")
+        
+        # Recursively crawl subdirectories
+        for directory in directories:
+            # Build new path
+            new_path = current_path.rstrip("/") + "/" + directory
+            
+            # Recursive call
+            scrape_ftp_directory_recursive(
+                base_url,
+                new_path,
+                depth + 1,
+                visited,
+                all_movies
+            )
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"{'  ' * depth}❌ Error crawling {current_path}: {e}")
+    except Exception as e:
+        logger.error(f"{'  ' * depth}❌ Unexpected error at {current_path}: {e}")
+    
+    return all_movies
+
+
+def scrape_all_directories():
+    """
+    Start recursive crawling from FTP root.
+    Returns list of all discovered movies.
+    """
+    logger.info("=" * 80)
+    logger.info("Starting RECURSIVE FTP crawl from root...")
+    logger.info(f"Base URL: {FTP_BASE_URL}")
+    logger.info(f"Max recursion depth: {MAX_RECURSION_DEPTH}")
+    logger.info("=" * 80)
+    
+    all_movies = scrape_ftp_directory_recursive(FTP_BASE_URL, FTP_START_PATH)
+    
+    logger.info("=" * 80)
+    logger.info(f"✅ Crawl completed! Total movies found: {len(all_movies)}")
+    logger.info("=" * 80)
+    
+    return all_movies
     """Extract movie title, year, quality from filename"""
     # Remove extension
     name = os.path.splitext(filename)[0]
@@ -258,84 +507,6 @@ def parse_file_size(size_str):
     
     multiplier = multipliers.get(unit, 1)
     return int(number * multiplier)
-
-
-def scrape_ftp_directory(directory_url):
-    """Scrape FTP directory listing for movies"""
-    movies = []
-    
-    try:
-        response = requests.get(directory_url, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Parse directory listing (Apache/Nginx style)
-        for row in soup.find_all("tr"):
-            cells = row.find_all("td")
-            if len(cells) < 3:
-                continue
-            
-            # Get filename link
-            link_tag = cells[0].find("a")
-            if not link_tag:
-                continue
-            
-            filename = link_tag.text.strip()
-            
-            # Skip directories and non-video files
-            if filename.endswith("/") or filename == "..":
-                continue
-            
-            extension = os.path.splitext(filename)[1].lower()
-            if extension not in [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm"]:
-                continue
-            
-            # Get file size
-            size_text = cells[1].text.strip() if len(cells) > 1 else "0"
-            size_bytes = parse_file_size(size_text)
-            
-            # Skip small files (< 100MB, probably samples)
-            if size_bytes and size_bytes < 100 * 1024 * 1024:
-                continue
-            
-            # Build full URL
-            file_url = directory_url.rstrip("/") + "/" + filename
-            
-            # Parse movie metadata
-            metadata = parse_movie_title(filename)
-            
-            movies.append({
-                "title": metadata["title"],
-                "url": file_url,
-                "size_bytes": size_bytes,
-                "size_readable": size_text,
-                "extension": extension,
-                "quality": metadata["quality"],
-                "year": metadata["year"],
-            })
-            
-        logger.info(f"Found {len(movies)} movies in {directory_url}")
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error scraping {directory_url}: {e}")
-    
-    return movies
-
-
-def scrape_all_directories():
-    """Scrape all configured FTP directories"""
-    all_movies = []
-    
-    for path in FTP_MOVIE_PATHS:
-        url = FTP_BASE_URL + path
-        logger.info(f"Scraping {url}...")
-        movies = scrape_ftp_directory(url)
-        all_movies.extend(movies)
-    
-    logger.info(f"Total movies found: {len(all_movies)}")
-    return all_movies
-
 
 # =====================================================
 # GITHUB ACTIONS TRIGGER
