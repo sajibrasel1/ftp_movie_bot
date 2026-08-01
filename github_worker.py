@@ -53,7 +53,7 @@ MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB (safe buffer under 2GB limit)
 MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 
 # Retry configuration
-MAX_RETRIES = 3
+MAX_RETRIES = 5  # Increased to 5 attempts
 RETRY_DELAY = 5  # seconds
 
 # =====================================================
