@@ -75,7 +75,12 @@ logger = logging.getLogger(__name__)
 def get_db_connection():
     """Get MySQL database connection"""
     if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
-        logger.warning("⚠️ Database credentials not provided")
+        logger.warning("⚠️ Database credentials not provided - database updates will be skipped")
+        return None
+    
+    # Skip database connection if running from GitHub (can't connect to cPanel MySQL)
+    if DB_HOST == "localhost":
+        logger.warning("⚠️ Database host is localhost - skipping database connection (GitHub runner can't access cPanel MySQL)")
         return None
     
     try:
@@ -87,7 +92,7 @@ def get_db_connection():
             connect_timeout=10,
         )
     except mysql.connector.Error as e:
-        logger.error(f"❌ Database connection failed: {e}")
+        logger.warning(f"⚠️ Database connection failed: {e} - continuing without database updates")
         return None
 
 
@@ -131,49 +136,68 @@ def update_movie_status(db_conn, status, **kwargs):
 # FILE DOWNLOAD OPERATIONS
 # =====================================================
 
-def download_file(url, output_path):
+def download_file(url, output_path, max_retries=3):
     """
-    Download file from URL with progress tracking and error handling.
+    Download file from URL with progress tracking, error handling, and retry logic.
     Downloads to GitHub runner (not cPanel server).
     """
     logger.info(f"📥 Downloading from: {url}")
     logger.info(f"💾 Saving to: {output_path}")
     
-    try:
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get("content-length", 0))
-        logger.info(f"📊 File size: {total_size / (1024**3):.2f} GB")
-        
-        if total_size > MAX_FILE_SIZE_FOR_PROCESSING:
-            raise ValueError(f"File too large: {total_size / (1024**3):.2f} GB")
-        
-        downloaded = 0
-        chunk_size = 8192 * 1024  # 8 MB chunks
-        
-        with open(output_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Log progress every 100 MB
-                    if downloaded % (100 * 1024 * 1024) < chunk_size:
-                        progress = (downloaded / total_size) * 100 if total_size else 0
-                        logger.info(f"📥 Progress: {downloaded / (1024**3):.2f} GB / {total_size / (1024**3):.2f} GB ({progress:.1f}%)")
-        
-        actual_size = os.path.getsize(output_path)
-        logger.info(f"✅ Download complete: {actual_size / (1024**3):.2f} GB")
-        
-        return actual_size
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Download failed: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"❌ Unexpected error during download: {e}")
-        raise
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Use longer timeout and connection settings
+            response = requests.get(
+                url, 
+                stream=True, 
+                timeout=(30, 300),  # (connect timeout, read timeout)
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Connection': 'keep-alive',
+                }
+            )
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get("content-length", 0))
+            logger.info(f"📊 File size: {total_size / (1024**3):.2f} GB")
+            
+            if total_size > MAX_FILE_SIZE_FOR_PROCESSING:
+                raise ValueError(f"File too large: {total_size / (1024**3):.2f} GB")
+            
+            downloaded = 0
+            chunk_size = 1024 * 1024  # 1 MB chunks (smaller for stability)
+            
+            with open(output_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # Log progress every 100 MB
+                        if downloaded % (100 * 1024 * 1024) < chunk_size:
+                            progress = (downloaded / total_size) * 100 if total_size else 0
+                            logger.info(f"📥 Progress: {downloaded / (1024**3):.2f} GB / {total_size / (1024**3):.2f} GB ({progress:.1f}%)")
+            
+            actual_size = os.path.getsize(output_path)
+            logger.info(f"✅ Download complete: {actual_size / (1024**3):.2f} GB")
+            
+            return actual_size
+            
+        except (requests.exceptions.RequestException, Exception) as e:
+            logger.error(f"❌ Download attempt {attempt}/{max_retries} failed: {e}")
+            
+            # Clean up partial download
+            if os.path.exists(output_path):
+                os.remove(output_path)
+                logger.info(f"🗑️ Removed partial download")
+            
+            if attempt < max_retries:
+                wait_time = attempt * 10  # Exponential backoff: 10s, 20s, 30s
+                logger.info(f"⏳ Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"❌ All {max_retries} download attempts failed")
+                raise
 
 
 # =====================================================
