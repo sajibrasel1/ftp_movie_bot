@@ -54,6 +54,7 @@ MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
 
 # Retry configuration
 MAX_DOWNLOAD_RETRIES = None  # None = unlimited retries (will keep trying until success)
+MAX_UPLOAD_RETRIES = 3  # Telegram upload retries
 # GitHub Actions has 6-hour timeout, so it will retry within that time
 RETRY_DELAY_BASE = 5  # Base delay in seconds (will increase: 5s, 10s, 15s... up to 60s max)
 
@@ -324,7 +325,7 @@ def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total
     file_size = os.path.getsize(file_path)
     logger.info(f"📤 Uploading: {Path(file_path).name} ({file_size / (1024**3):.2f} GB)")
     
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
         try:
             with open(file_path, "rb") as video_file:
                 message = bot.send_video(
@@ -343,7 +344,7 @@ def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total
         except TelegramError as e:
             logger.error(f"❌ Telegram upload failed (attempt {attempt}/{MAX_RETRIES}): {e}")
             
-            if attempt < MAX_RETRIES:
+            if attempt < MAX_UPLOAD_RETRIES:
                 logger.info(f"⏳ Retrying in {RETRY_DELAY} seconds...")
                 time.sleep(RETRY_DELAY)
             else:
