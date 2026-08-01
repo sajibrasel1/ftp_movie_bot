@@ -19,7 +19,6 @@ Author: AI Assistant
 Version: 2.0 (Professional Edition)
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -30,8 +29,6 @@ from pathlib import Path
 
 import mysql.connector
 import requests
-from telegram import Bot
-from telegram.error import TelegramError
 
 # =====================================================
 # CONFIGURATION FROM ENVIRONMENT VARIABLES
@@ -316,11 +313,10 @@ def split_video(input_path, file_size):
 # TELEGRAM UPLOAD OPERATIONS
 # =====================================================
 
-async def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None, total_parts=None):
+def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=None, total_parts=None):
     """
-    Upload video file to Telegram with retry logic.
-    Handles both single files and multi-part uploads.
-    Uses extended timeouts for large files.
+    Upload video file to Telegram using direct HTTP requests (more stable for large files).
+    Uses requests library instead of python-telegram-bot for better control over timeouts.
     """
     if part_number:
         caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
@@ -328,43 +324,74 @@ async def upload_to_telegram(file_path, caption, bot, chat_id, part_number=None,
     file_size = os.path.getsize(file_path)
     logger.info(f"📤 Uploading: {Path(file_path).name} ({file_size / (1024**3):.2f} GB)")
     
-    # Calculate appropriate timeout based on file size
-    # Estimate: ~1 minute per 100MB for slow connections
-    estimated_upload_time = (file_size / (100 * 1024 * 1024)) * 60
-    upload_timeout = max(600, int(estimated_upload_time * 2))  # At least 10 minutes, or 2x estimated time
+    # Telegram Bot API endpoint
+    url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
     
+    # Calculate appropriate timeout (at least 30 minutes for large files)
+    upload_timeout = max(1800, int((file_size / (50 * 1024 * 1024)) * 60))  # 1 minute per 50MB minimum
     logger.info(f"⏱️ Upload timeout set to: {upload_timeout} seconds ({upload_timeout/60:.1f} minutes)")
     
     for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
         try:
+            logger.info(f"📤 Upload attempt {attempt}/{MAX_UPLOAD_RETRIES}")
+            
             with open(file_path, "rb") as video_file:
-                message = await bot.send_video(
-                    chat_id=chat_id,
-                    video=video_file,
-                    caption=caption,
-                    supports_streaming=True,
-                    read_timeout=upload_timeout,
-                    write_timeout=upload_timeout,
-                    connect_timeout=120,  # 2 minutes for initial connection
-                    pool_timeout=120,
+                files = {
+                    'video': (Path(file_path).name, video_file, 'video/mp4')
+                }
+                
+                data = {
+                    'chat_id': chat_id,
+                    'caption': caption,
+                    'supports_streaming': 'true'
+                }
+                
+                # Use requests with custom timeout and keep-alive
+                response = requests.post(
+                    url,
+                    files=files,
+                    data=data,
+                    timeout=(120, upload_timeout),  # (connect timeout, read timeout)
+                    headers={
+                        'Connection': 'keep-alive',
+                    }
                 )
+                
+                response.raise_for_status()
+                result = response.json()
+                
+                if result.get('ok'):
+                    message_id = result['result']['message_id']
+                    logger.info(f"✅ Upload successful: Message ID {message_id}")
+                    return message_id
+                else:
+                    raise Exception(f"Telegram API error: {result.get('description', 'Unknown error')}")
             
-            logger.info(f"✅ Upload successful: Message ID {message.message_id}")
-            return message.message_id
-            
-        except TelegramError as e:
-            logger.error(f"❌ Telegram upload failed (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+        except requests.exceptions.Timeout as e:
+            logger.error(f"❌ Upload timeout (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
             if attempt < MAX_UPLOAD_RETRIES:
-                wait_time = RETRY_DELAY * attempt  # Exponential backoff: 10s, 20s, 30s
+                wait_time = RETRY_DELAY * attempt
                 logger.info(f"⏳ Retrying in {wait_time} seconds...")
-                await asyncio.sleep(wait_time)
+                time.sleep(wait_time)
+            else:
+                raise
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Upload failed (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+            
+            if attempt < MAX_UPLOAD_RETRIES:
+                wait_time = RETRY_DELAY * attempt
+                logger.info(f"⏳ Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
             else:
                 raise
         
         except Exception as e:
             logger.error(f"❌ Unexpected error during upload: {e}")
             raise
+    
+    raise Exception(f"Failed to upload after {MAX_UPLOAD_RETRIES} attempts")
 
 
 # =====================================================
@@ -395,7 +422,7 @@ def cleanup_files(*file_patterns):
 # MAIN EXECUTION
 # =====================================================
 
-async def main():
+def main():
     """Main execution function"""
     logger.info("=" * 80)
     logger.info("🎬 FTP MOVIE BOT - GITHUB WORKER")
@@ -416,9 +443,6 @@ async def main():
         
         # Connect to database
         db_conn = get_db_connection()
-        
-        # Initialize Telegram bot
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         
         # Determine file extension from URL
         extension = Path(MOVIE_URL).suffix or ".mp4"
@@ -451,10 +475,10 @@ async def main():
         for i, part_file in enumerate(file_parts, 1):
             caption = MOVIE_TITLE if not is_split else MOVIE_TITLE
             
-            message_id = await upload_to_telegram(
+            message_id = upload_to_telegram_sync(
                 part_file,
                 caption,
-                bot,
+                TELEGRAM_BOT_TOKEN,
                 TELEGRAM_CHAT_ID,
                 part_number=i if is_split else None,
                 total_parts=total_parts if is_split else None
@@ -498,4 +522,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
