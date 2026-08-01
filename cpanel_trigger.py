@@ -148,7 +148,7 @@ def get_pending_movies(cursor, limit=5):
             """
             SELECT id, movie_title, movie_url, movie_size_bytes 
             FROM ftp_movies 
-            WHERE (status = 'pending' OR (status = 'failed' AND retry_count < 3))
+            WHERE (status = 'pending' OR (status = 'failed' AND retry_count < 5))
             ORDER BY 
                 CASE WHEN status = 'pending' THEN 0 ELSE 1 END,
                 created_at ASC 
