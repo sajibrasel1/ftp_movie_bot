@@ -993,6 +993,10 @@ def upload_with_bot_token(file_path, caption, channel_id, bot_token):
 def format_movie_caption(title, is_split=False, part_number=None, total_parts=None):
     """Format movie title for Telegram caption"""
     import re
+    from urllib.parse import unquote
+    
+    # Decode URL-encoded title first (convert %20 to spaces, %28 to (, etc.)
+    title = unquote(title)
     
     # Parse title to extract components
     clean_title = title
