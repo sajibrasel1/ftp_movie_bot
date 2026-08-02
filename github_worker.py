@@ -1035,62 +1035,10 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
     # Add part info to caption
     caption_with_part = caption
     if part_number and total_parts:
-        caption_with_part = f"{caption}\n\n� Part {part_number}/{total_parts}"
+        caption_with_part = f"{caption}\n\n📦 Part {part_number}/{total_parts}"
     
     # Use Bot Token upload (supports 2GB, no session conflicts)
     return upload_with_bot_token(file_path, caption_with_part, chat_id, bot_token)
-            
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"❌ Connection error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
-            
-        except requests.exceptions.Timeout:
-            duration = time.time() - upload_start
-            logger.error(f"❌ Timeout after {format_eta(duration)} (attempt {attempt}/{MAX_UPLOAD_RETRIES})")
-            
-        except requests.exceptions.ChunkedEncodingError as e:
-            logger.error(f"❌ ChunkedEncoding error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
-            
-        except requests.exceptions.RequestException as e:
-            # Log response body for debugging
-            error_details = ""
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_json = e.response.json()
-                    error_details = f" | API error: {error_json.get('description', 'No description')}"
-                except:
-                    error_details = f" | Response: {e.response.text[:200]}"
-            logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}{error_details}")
-            
-        except (BrokenPipeError, ConnectionResetError) as e:
-            logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES})")
-            
-        except Exception as e:
-            logger.error(f"❌ Unexpected {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
-            if attempt >= MAX_UPLOAD_RETRIES:
-                raise
-        
-        finally:
-            # CRITICAL: Always close response and session to prevent memory leaks
-            if response:
-                try:
-                    response.close()
-                except:
-                    pass
-            if session:
-                try:
-                    session.close()
-                except:
-                    pass
-        
-        # Retry logic
-        if attempt < MAX_UPLOAD_RETRIES:
-            wait_time = calculate_exponential_backoff(attempt)
-            logger.info(f"⏳ Waiting {wait_time:.1f}s before retry...")
-            time.sleep(wait_time)
-        else:
-            raise Exception(f"Failed to upload {file_path} after {MAX_UPLOAD_RETRIES} attempts")
-    
-    raise Exception(f"Upload failed unexpectedly")
 
 
 # =====================================================
