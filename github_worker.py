@@ -847,7 +847,7 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
             data = {
                 'chat_id': chat_id,
                 'caption': caption[:1024],
-                'supports_streaming': 'true'
+                'supports_streaming': True
             }
             
             logger.info("📡 Starting streaming upload...")
@@ -900,7 +900,15 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
             logger.error(f"❌ ChunkedEncoding error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+            # Log response body for debugging
+            error_details = ""
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_json = e.response.json()
+                    error_details = f" | API error: {error_json.get('description', 'No description')}"
+                except:
+                    error_details = f" | Response: {e.response.text[:200]}"
+            logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}{error_details}")
             
         except (BrokenPipeError, ConnectionResetError) as e:
             logger.error(f"❌ {type(e).__name__} (attempt {attempt}/{MAX_UPLOAD_RETRIES})")
@@ -1026,7 +1034,10 @@ def main():
     logger.info(f"Movie ID: {MOVIE_ID}")
     logger.info(f"Movie Title: {MOVIE_TITLE}")
     logger.info(f"Movie URL: {MOVIE_URL}")
-    logger.info(f"Using self-hosted Telegram Bot API Server")
+    if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
+        logger.info(f"Using custom Telegram Bot API: {TELEGRAM_API_BASE_URL}")
+    else:
+        logger.info(f"Using official Telegram Bot API")
     logger.info("=" * 80)
     
     db_conn = None
