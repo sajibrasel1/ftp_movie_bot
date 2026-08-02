@@ -2,11 +2,8 @@
 # FTP Movie Bot - Python Dependencies
 # =====================================================
 
-# Telegram Bot API
+# Telegram Bot API (supports 2GB uploads)
 python-telegram-bot==20.7
-
-# Telethon (for direct MTProto uploads, supports 2GB files)
-telethon==1.35.0
 
 # HTTP Requests
 requests==2.31.0

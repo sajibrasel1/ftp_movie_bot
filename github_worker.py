@@ -51,11 +51,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_API_URL = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org")
 
-# Telethon credentials (optional, for direct MTProto uploads)
-TELEGRAM_API_ID = os.environ.get("TELEGRAM_API_ID")
-TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH")
-TELEGRAM_PHONE_NUMBER = os.environ.get("TELEGRAM_PHONE_NUMBER")
-USE_TELETHON = os.environ.get("USE_TELETHON", "false").lower() == "true"
+# Database connection (now via API endpoint)
+DB_API_URL = os.environ.get("DB_API_URL")  # API endpoint for database updates
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_USER = os.environ.get("DB_USER")
@@ -915,67 +912,60 @@ class StreamingFileReader:
         return self.file.read(size)
 
 
-def upload_with_telethon_sync(file_path, caption, channel_id):
-    """Upload large files using Telethon (supports 2GB without self-hosted API)"""
-    import asyncio
-    from telethon import TelegramClient
-    from telethon.tl.types import DocumentAttributeVideo
+def upload_with_bot_token(file_path, caption, channel_id, bot_token):
+    """
+    Upload files using Bot Token (no session file needed)
+    Supports up to 2GB using python-telegram-bot library
+    """
+    logger.info("📤 Using Bot Token for upload (supports 2GB, no session conflicts)")
     
-    logger.info("📤 Using Telethon for upload (supports 2GB natively)")
-    
-    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
-        raise ValueError("TELEGRAM_API_ID and TELEGRAM_API_HASH required for Telethon")
-    
-    async def do_upload():
-        client = TelegramClient('telegram_session', int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+    try:
+        # Use telegram.Bot for synchronous upload
+        from telegram import Bot
+        from telegram.request import HTTPXRequest
         
-        try:
-            # Start client (will use existing session or create new one)
-            await client.start(phone=lambda: TELEGRAM_PHONE_NUMBER)
-            logger.info("✅ Connected to Telegram via Telethon")
-            
-            file_size = os.path.getsize(file_path)
-            last_progress_time = [time.time()]
-            
-            def progress_callback(current, total):
-                now = time.time()
-                if now - last_progress_time[0] >= 10:  # Log every 10 seconds
-                    percent = (current / total) * 100
-                    speed = current / (now - last_progress_time[0]) if (now - last_progress_time[0]) > 0 else 0
-                    logger.info(
-                        f"📤 Progress: {current / (1024**3):.2f} GB / {total / (1024**3):.2f} GB "
-                        f"({percent:.1f}%) | Speed: {format_speed(speed)}"
-                    )
-                    last_progress_time[0] = now
-            
-            # Upload video
-            logger.info("📤 Starting Telethon upload...")
-            message = await client.send_file(
-                int(channel_id),
-                file_path,
+        # Create bot with extended timeout for large files
+        request = HTTPXRequest(
+            connection_pool_size=8,
+            connect_timeout=60.0,
+            read_timeout=120.0,
+            write_timeout=120.0,
+            pool_timeout=60.0
+        )
+        
+        bot = Bot(token=bot_token, request=request)
+        
+        file_size = os.path.getsize(file_path)
+        logger.info(f"� File size: {file_size / (1024**3):.2f} GB")
+        logger.info(f"📤 Starting bot upload to channel {channel_id}...")
+        
+        start_time = time.time()
+        
+        # Upload as video with streaming support
+        with open(file_path, 'rb') as video_file:
+            message = bot.send_video(
+                chat_id=int(channel_id),
+                video=video_file,
                 caption=caption[:1024],
                 supports_streaming=True,
-                progress_callback=progress_callback,
-                attributes=[
-                    DocumentAttributeVideo(
-                        duration=0,
-                        w=1920,
-                        h=1080,
-                        supports_streaming=True
-                    )
-                ]
+                read_timeout=300,
+                write_timeout=300,
+                connect_timeout=60,
+                pool_timeout=60
             )
-            
-            logger.info(f"✅ Telethon upload successful!")
-            logger.info(f"📨 Message ID: {message.id}")
-            
-            return message.id
-            
-        finally:
-            await client.disconnect()
-    
-    # Run async function in sync context
-    return asyncio.run(do_upload())
+        
+        elapsed = time.time() - start_time
+        speed = file_size / elapsed if elapsed > 0 else 0
+        
+        logger.info(f"✅ Bot upload successful!")
+        logger.info(f"📨 Message ID: {message.message_id}")
+        logger.info(f"⏱️ Upload took {elapsed:.1f}s ({format_speed(speed)})")
+        
+        return message.message_id
+        
+    except Exception as e:
+        logger.error(f"❌ Bot upload failed: {e}")
+        raise
 
 
 def format_movie_caption(title, is_split=False, part_number=None, total_parts=None):
@@ -1035,94 +1025,20 @@ def format_movie_caption(title, is_split=False, part_number=None, total_parts=No
 
 
 def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=None, total_parts=None):
-    """Upload video with retry logic and streaming"""
-    
-    # Check if we should use Telethon instead
-    file_size = os.path.getsize(file_path)
-    is_official_api = TELEGRAM_API_URL == "https://api.telegram.org"
-    
-    if USE_TELETHON or (is_official_api and file_size > 50_000_000):
-        # Use Telethon for files > 50MB on official API
-        logger.info("🔄 Switching to Telethon for large file upload")
-        caption_with_part = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}" if part_number and total_parts else caption
-        return upload_with_telethon_sync(file_path, caption_with_part, chat_id)
-    
-    # Otherwise use Bot API
-    if part_number and total_parts:
-        caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
+    """Upload video using Bot Token (no session conflicts)"""
     
     file_size = os.path.getsize(file_path)
     file_size_gb = file_size / (1024**3)
     
     logger.info(f"📤 Uploading part {part_number or 1}/{total_parts or 1}: {Path(file_path).name} ({file_size_gb:.2f} GB)")
     
-    if file_size > PART_SIZE_HARD_LIMIT:
-        raise ValueError(f"File too large: {file_size_gb:.2f} GB (exceeds hard limit)")
-    elif file_size > MAX_TELEGRAM_SIZE:
-        logger.warning(f"⚠️ File {file_size_gb:.2f} GB exceeds preferred limit but within hard limit")
+    # Add part info to caption
+    caption_with_part = caption
+    if part_number and total_parts:
+        caption_with_part = f"{caption}\n\n� Part {part_number}/{total_parts}"
     
-    url = f"{TELEGRAM_API_URL.rstrip('/')}/bot{bot_token}/sendVideo"
-    
-    # Increased timeout for large files (1.9 GB can take hours on slow connections)
-    base_timeout = 10800  # 3 hours base timeout for large files
-    size_based_timeout = int((file_size / (100 * 1024 * 1024)) * 300)  # +5 min per 100MB
-    upload_timeout = base_timeout + size_based_timeout
-    
-    logger.info(f"⏱️ Upload timeout: {upload_timeout}s ({format_eta(upload_timeout)})")
-    
-    for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
-        upload_start = time.time()
-        session = None
-        response = None
-        
-        try:
-            logger.info(f"📤 Upload attempt {attempt}/{MAX_UPLOAD_RETRIES}")
-            
-            session = create_upload_session()
-            
-            data = {
-                'chat_id': chat_id,
-                'caption': caption[:1024],
-                'supports_streaming': True
-            }
-            
-            # Use standard file open for official Telegram API (simpler and more reliable)
-            with open(file_path, 'rb') as video_file:
-                files = {
-                    'video': (Path(file_path).name, video_file, 'video/mp4')
-                }
-                
-                response = session.post(
-                    url,
-                    files=files,
-                    data=data,
-                    timeout=(180, upload_timeout),
-                    headers={
-                        'Connection': 'keep-alive',
-                        'Accept': '*/*',
-                    },
-                    stream=False
-                )
-            
-            duration = time.time() - upload_start
-            avg_speed = file_size / duration if duration > 0 else 0
-            
-            response.raise_for_status()
-            result = response.json()
-            
-            if result.get('ok'):
-                message_id = result['result']['message_id']
-                logger.info(f"✅ Upload successful in {format_eta(duration)}")
-                logger.info(f"📊 Average speed: {format_speed(avg_speed)}")
-                logger.info(f"📨 Message ID: {message_id}")
-                
-                return message_id
-            else:
-                error_desc = result.get('description', 'Unknown error')
-                raise Exception(f"Telegram API error: {error_desc}")
-        
-        except requests.exceptions.SSLError as e:
-            logger.error(f"❌ SSL error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")
+    # Use Bot Token upload (supports 2GB, no session conflicts)
+    return upload_with_bot_token(file_path, caption_with_part, chat_id, bot_token)
             
         except requests.exceptions.ConnectionError as e:
             logger.error(f"❌ Connection error (attempt {attempt}/{MAX_UPLOAD_RETRIES}): {e}")

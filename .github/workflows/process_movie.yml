@@ -80,13 +80,8 @@ jobs:
           MOVIE_URL: ${{ github.event.inputs.movie_url }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_PHONE_NUMBER: ${{ secrets.TELEGRAM_PHONE_NUMBER }}
-          USE_TELETHON: ${{ secrets.USE_TELETHON }}
           # Database API endpoint (instead of direct MySQL connection)
           DB_API_URL: ${{ secrets.DB_API_URL }}
-          DB_API_KEY: ${{ secrets.DB_API_KEY }}
         run: |
           python github_worker.py
       
