@@ -62,8 +62,8 @@ DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 DB_NAME = os.environ.get("DB_NAME")
 
-MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB for self-hosted API (2GB with safety margin)
-MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
+MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB for Telethon (2GB with safety margin)
+MAX_FILE_SIZE_FOR_PROCESSING = 20_000_000_000  # 20 GB max (will split into 1.9GB parts)
 PART_SIZE_HARD_LIMIT = 2_000_000_000  # 2 GB absolute maximum
 PART_SIZE_VERIFICATION_MARGIN = 50_000_000  # 50 MB safety
 
@@ -899,6 +899,62 @@ def upload_with_telethon_sync(file_path, caption, channel_id):
     return asyncio.run(do_upload())
 
 
+def format_movie_caption(title, is_split=False, part_number=None, total_parts=None):
+    """Format movie title for Telegram caption"""
+    import re
+    
+    # Parse title to extract components
+    clean_title = title
+    year = None
+    quality = None
+    
+    # Extract year
+    year_match = re.search(r'(19|20)\d{2}', title)
+    if year_match:
+        year = year_match.group()
+        clean_title = re.sub(r'(19|20)\d{2}', '', clean_title)
+    
+    # Extract quality
+    quality_patterns = [
+        (r'2160p|4K|UHD', '4K UHD'),
+        (r'1080p', '1080p Full HD'),
+        (r'720p', '720p HD'),
+        (r'480p', '480p'),
+        (r'BluRay|BRRip|BDRip', 'BluRay'),
+        (r'WEB-?DL|WEBRip', 'WEB-DL'),
+        (r'DVDRip|DVD', 'DVDRip'),
+    ]
+    
+    for pattern, label in quality_patterns:
+        if re.search(pattern, title, re.IGNORECASE):
+            quality = label
+            clean_title = re.sub(pattern, '', clean_title, flags=re.IGNORECASE)
+            break
+    
+    # Clean up title
+    clean_title = re.sub(r'[._-]+', ' ', clean_title)
+    clean_title = re.sub(r'\[.*?\]', '', clean_title)  # Remove [DDN], [YTS], etc.
+    clean_title = re.sub(r'\(.*?\)', '', clean_title)  # Remove (2024), etc.
+    clean_title = re.sub(r'\s+', ' ', clean_title).strip()
+    
+    # Build caption
+    caption_parts = ['🎬', clean_title]
+    
+    if year:
+        caption_parts.append(f'({year})')
+    
+    if quality:
+        caption_parts.append(f'[{quality}]')
+    
+    caption = ' '.join(caption_parts)
+    
+    # Add part info if split
+    if is_split and part_number and total_parts:
+        caption += f'\n\n📦 Part {part_number}/{total_parts}'
+    
+    return caption
+
+
 def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=None, total_parts=None):
     """Upload video with retry logic and streaming"""
     
@@ -1246,7 +1302,12 @@ def main():
         
         # Upload each part
         for i, part_file in enumerate(parts_to_upload, start=parts_already_uploaded + 1):
-            caption = MOVIE_TITLE if not is_split else MOVIE_TITLE
+            caption = format_movie_caption(
+                MOVIE_TITLE,
+                is_split=is_split,
+                part_number=i if is_split else None,
+                total_parts=total_parts if is_split else None
+            )
             
             logger.info(f"\n{'=' * 60}")
             logger.info(f"📤 Starting upload: Part {i}/{total_parts}")
