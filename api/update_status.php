@@ -56,15 +56,23 @@ if (!$data) {
     exit;
 }
 
-// Validate required fields
-if (!isset($data['movie_id']) || !isset($data['action'])) {
+// Validate action field
+if (!isset($data['action'])) {
     http_response_code(400);
-    echo json_encode(['error' => 'Missing movie_id or action']);
+    echo json_encode(['error' => 'Missing action']);
     exit;
 }
 
-$movie_id = intval($data['movie_id']);
 $action = $data['action'];
+
+// Test action doesn't need movie_id
+if ($action !== 'test' && !isset($data['movie_id'])) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Missing movie_id']);
+    exit;
+}
+
+$movie_id = isset($data['movie_id']) ? intval($data['movie_id']) : 0;
 
 // Connect to database
 try {
@@ -86,6 +94,16 @@ try {
 // Handle different actions
 try {
     switch ($action) {
+        case 'test':
+            // Test connection
+            echo json_encode([
+                'success' => true,
+                'message' => 'API is working',
+                'database' => 'Connected',
+                'timestamp' => date('Y-m-d H:i:s')
+            ]);
+            break;
+        
         case 'save_message_id':
             // Save single message ID
             if (!isset($data['message_id'])) {
