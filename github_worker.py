@@ -917,55 +917,61 @@ def upload_with_bot_token(file_path, caption, channel_id, bot_token):
     Upload files using Bot Token (no session file needed)
     Supports up to 2GB using python-telegram-bot library
     """
-    logger.info("📤 Using Bot Token for upload (supports 2GB, no session conflicts)")
+    import asyncio
     
-    try:
-        # Use telegram.Bot for synchronous upload
-        from telegram import Bot
-        from telegram.request import HTTPXRequest
-        
-        # Create bot with extended timeout for large files
-        request = HTTPXRequest(
-            connection_pool_size=8,
-            connect_timeout=60.0,
-            read_timeout=120.0,
-            write_timeout=120.0,
-            pool_timeout=60.0
-        )
-        
-        bot = Bot(token=bot_token, request=request)
-        
-        file_size = os.path.getsize(file_path)
-        logger.info(f"� File size: {file_size / (1024**3):.2f} GB")
-        logger.info(f"📤 Starting bot upload to channel {channel_id}...")
-        
-        start_time = time.time()
-        
-        # Upload as video with streaming support
-        with open(file_path, 'rb') as video_file:
-            message = bot.send_video(
-                chat_id=int(channel_id),
-                video=video_file,
-                caption=caption[:1024],
-                supports_streaming=True,
-                read_timeout=300,
-                write_timeout=300,
-                connect_timeout=60,
-                pool_timeout=60
+    logger.info("Using Bot Token for upload (supports 2GB, no session conflicts)")
+    
+    async def do_upload():
+        try:
+            from telegram import Bot
+            from telegram.request import HTTPXRequest
+            
+            # Create bot with extended timeout for large files
+            request = HTTPXRequest(
+                connection_pool_size=8,
+                connect_timeout=60.0,
+                read_timeout=300.0,
+                write_timeout=300.0,
+                pool_timeout=60.0
             )
-        
-        elapsed = time.time() - start_time
-        speed = file_size / elapsed if elapsed > 0 else 0
-        
-        logger.info(f"✅ Bot upload successful!")
-        logger.info(f"📨 Message ID: {message.message_id}")
-        logger.info(f"⏱️ Upload took {elapsed:.1f}s ({format_speed(speed)})")
-        
-        return message.message_id
-        
-    except Exception as e:
-        logger.error(f"❌ Bot upload failed: {e}")
-        raise
+            
+            bot = Bot(token=bot_token, request=request)
+            
+            file_size = os.path.getsize(file_path)
+            logger.info(f"File size: {file_size / (1024**3):.2f} GB")
+            logger.info(f"Starting bot upload to channel {channel_id}...")
+            
+            start_time = time.time()
+            
+            # Upload as video with streaming support
+            with open(file_path, 'rb') as video_file:
+                message = await bot.send_video(
+                    chat_id=int(channel_id),
+                    video=video_file,
+                    caption=caption[:1024],
+                    supports_streaming=True,
+                    read_timeout=300,
+                    write_timeout=300,
+                    connect_timeout=60,
+                    pool_timeout=60
+                )
+            
+            elapsed = time.time() - start_time
+            speed = file_size / elapsed if elapsed > 0 else 0
+            
+            logger.info(f"Bot upload successful!")
+            logger.info(f"Message ID: {message.message_id}")
+            logger.info(f"Upload took {elapsed:.1f}s ({format_speed(speed)})")
+            
+            return message.message_id
+            
+        except Exception as e:
+            logger.error(f"Bot upload failed: {e}")
+            raise
+    
+    # Run async function in sync context
+    return asyncio.run(do_upload())
+
 
 
 def format_movie_caption(title, is_split=False, part_number=None, total_parts=None):
