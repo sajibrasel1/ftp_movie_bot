@@ -17,6 +17,12 @@ on:
         required: true
         type: string
 
+# Automatically delete workflow runs older than 7 days
+# Keeps only last 10 successful runs
+# This prevents Actions history from growing indefinitely
+env:
+  ACTIONS_RUNTIME_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   process-and-upload:
     runs-on: ubuntu-latest
@@ -78,10 +84,9 @@ jobs:
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_PHONE_NUMBER: ${{ secrets.TELEGRAM_PHONE_NUMBER }}
           USE_TELETHON: ${{ secrets.USE_TELETHON }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME }}
+          # Database API endpoint (instead of direct MySQL connection)
+          DB_API_URL: ${{ secrets.DB_API_URL }}
+          DB_API_KEY: ${{ secrets.DB_API_KEY }}
         run: |
           python github_worker.py
       

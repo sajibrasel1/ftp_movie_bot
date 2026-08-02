@@ -193,8 +193,53 @@ def get_db_connection():
 
 
 def update_movie_status(db_conn, status, **kwargs):
-    """Update movie status with transaction safety and parameterized queries"""
-    if not db_conn or not MOVIE_ID:
+    """Update movie status via API endpoint (works from GitHub Actions)"""
+    if not MOVIE_ID:
+        return
+    
+    # Try API endpoint first (works from GitHub Actions)
+    api_url = os.environ.get("DB_API_URL")
+    api_key = os.environ.get("DB_API_KEY")
+    
+    if api_url and api_key:
+        try:
+            payload = {
+                "movie_id": int(MOVIE_ID),
+                "action": "update_status",
+                "status": status
+            }
+            
+            # Add optional fields
+            if "is_split" in kwargs:
+                payload["is_split"] = kwargs["is_split"]
+            if "total_parts" in kwargs:
+                payload["total_parts"] = kwargs["total_parts"]
+            if "telegram_message_ids" in kwargs:
+                payload["telegram_message_ids"] = kwargs["telegram_message_ids"]
+            if "telegram_channel_id" in kwargs:
+                payload["telegram_channel_id"] = str(kwargs["telegram_channel_id"])
+            if "error_message" in kwargs:
+                payload["error_message"] = str(kwargs["error_message"])[:500]
+            
+            response = requests.post(
+                api_url,
+                json=payload,
+                headers={"X-API-Key": api_key},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Database updated via API: status={status}")
+                return
+            else:
+                logger.error(f"❌ API error {response.status_code}: {response.text}")
+        
+        except Exception as e:
+            logger.error(f"❌ Failed to update via API: {e}")
+    
+    # Fallback to direct database connection (only works locally)
+    if not db_conn:
+        logger.warning("⚠️ No database connection and no API endpoint configured")
         return
     
     cursor = None
@@ -294,8 +339,42 @@ def get_uploaded_message_ids(db_conn):
 
 
 def save_message_id_immediately(db_conn, message_id):
-    """Save message ID with parameterized query"""
-    if not db_conn or not MOVIE_ID:
+    """Save message ID via API endpoint (works from GitHub Actions)"""
+    if not MOVIE_ID:
+        return
+    
+    # Try API endpoint first (works from GitHub Actions)
+    api_url = os.environ.get("DB_API_URL")
+    api_key = os.environ.get("DB_API_KEY")
+    
+    if api_url and api_key:
+        try:
+            payload = {
+                "movie_id": int(MOVIE_ID),
+                "action": "save_message_id",
+                "message_id": message_id
+            }
+            
+            response = requests.post(
+                api_url,
+                json=payload,
+                headers={"X-API-Key": api_key},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"💾 Saved message ID {message_id} via API (total: {result.get('total_parts', '?')})")
+                return
+            else:
+                logger.error(f"❌ API error {response.status_code}: {response.text}")
+        
+        except Exception as e:
+            logger.error(f"❌ Failed to save via API: {e}")
+    
+    # Fallback to direct database connection (only works locally)
+    if not db_conn:
+        logger.warning("⚠️ No database connection and no API endpoint configured")
         return
     
     cursor = None
