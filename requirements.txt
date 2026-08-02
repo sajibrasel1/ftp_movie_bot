@@ -19,3 +19,7 @@ mysql-connector-python==8.2.0
 
 # Additional utilities
 lxml==4.9.3
+
+# Web Scraping with Browser Automation (for elaach.com)
+selenium==4.16.0
+webdriver-manager==4.0.1  # Auto-downloads ChromeDriver
