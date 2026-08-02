@@ -30,15 +30,16 @@ MOVIE_URL = os.environ.get("MOVIE_URL")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_API_BASE_URL = os.environ.get("TELEGRAM_API_BASE_URL", "https://api.telegram.org")
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 DB_NAME = os.environ.get("DB_NAME")
 
-MAX_TELEGRAM_SIZE = 1_800_000_000  # 1.8 GB
+MAX_TELEGRAM_SIZE = 45_000_000  # 45 MB (official API limit is 50 MB)
 MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
-PART_SIZE_HARD_LIMIT = 1_850_000_000  # 1.85 GB absolute max
+PART_SIZE_HARD_LIMIT = 49_000_000  # 49 MB absolute max
 PART_SIZE_VERIFICATION_MARGIN = 50_000_000  # 50 MB safety
 
 MAX_DOWNLOAD_RETRIES = None  # Unlimited
@@ -825,7 +826,7 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
     elif file_size > MAX_TELEGRAM_SIZE:
         logger.warning(f"⚠️ File {file_size_gb:.2f} GB exceeds preferred limit but within hard limit")
     
-    url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
+    url = f"{TELEGRAM_API_BASE_URL}/bot{bot_token}/sendVideo"
     
     base_timeout = 7200
     size_based_timeout = int((file_size / (100 * 1024 * 1024)) * 180)
