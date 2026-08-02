@@ -3,6 +3,25 @@
 FTP Movie Bot - GitHub Worker Script (Production-Ready v3.1)
 =============================================================
 Runs on GitHub Actions with self-hosted Telegram Bot API Server.
+
+TELEGRAM API OPTIONS:
+--------------------
+1. Self-Hosted Bot API (Current): Supports up to 2GB files
+   - Setup: https://github.com/tdlib/telegram-bot-api
+   - Set TELEGRAM_API_URL=http://your-server:8081
+   - Requires API_ID and API_HASH from https://my.telegram.org
+
+2. Official Bot API: Limited to 50MB files
+   - URL: https://api.telegram.org (default)
+   - No setup needed, but files must be split
+
+3. Telethon/Pyrogram (Alternative): Direct MTProto, supports 2GB+
+   - No Bot API server needed
+   - Requires API_ID, API_HASH, and session file
+   - Example: 
+     from telethon import TelegramClient
+     client = TelegramClient('session', api_id, api_hash)
+     await client.send_file(channel_id, 'video.mp4')
 """
 
 import json
@@ -30,16 +49,16 @@ MOVIE_URL = os.environ.get("MOVIE_URL")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TELEGRAM_API_BASE_URL = os.environ.get("TELEGRAM_API_BASE_URL", "https://api.telegram.org")
+TELEGRAM_API_URL = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org")
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 DB_NAME = os.environ.get("DB_NAME")
 
-MAX_TELEGRAM_SIZE = 45_000_000  # 45 MB (official API limit is 50 MB)
+MAX_TELEGRAM_SIZE = 1_900_000_000  # 1.9 GB for self-hosted API (2GB with safety margin)
 MAX_FILE_SIZE_FOR_PROCESSING = 10_000_000_000  # 10 GB max
-PART_SIZE_HARD_LIMIT = 49_000_000  # 49 MB absolute max
+PART_SIZE_HARD_LIMIT = 2_000_000_000  # 2 GB absolute maximum
 PART_SIZE_VERIFICATION_MARGIN = 50_000_000  # 50 MB safety
 
 MAX_DOWNLOAD_RETRIES = None  # Unlimited
@@ -826,10 +845,11 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
     elif file_size > MAX_TELEGRAM_SIZE:
         logger.warning(f"⚠️ File {file_size_gb:.2f} GB exceeds preferred limit but within hard limit")
     
-    url = f"{TELEGRAM_API_BASE_URL}/bot{bot_token}/sendVideo"
+    url = f"{TELEGRAM_API_URL.rstrip('/')}/bot{bot_token}/sendVideo"
     
-    base_timeout = 7200
-    size_based_timeout = int((file_size / (100 * 1024 * 1024)) * 180)
+    # Increased timeout for large files (1.9 GB can take hours on slow connections)
+    base_timeout = 10800  # 3 hours base timeout for large files
+    size_based_timeout = int((file_size / (100 * 1024 * 1024)) * 300)  # +5 min per 100MB
     upload_timeout = base_timeout + size_based_timeout
     
     logger.info(f"⏱️ Upload timeout: {upload_timeout}s ({format_eta(upload_timeout)})")
@@ -1033,8 +1053,8 @@ def main():
     logger.info(f"Movie ID: {MOVIE_ID}")
     logger.info(f"Movie Title: {MOVIE_TITLE}")
     logger.info(f"Movie URL: {MOVIE_URL}")
-    if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
-        logger.info(f"Using custom Telegram Bot API: {TELEGRAM_API_BASE_URL}")
+    if TELEGRAM_API_URL != "https://api.telegram.org":
+        logger.info(f"Using custom Telegram Bot API: {TELEGRAM_API_URL}")
     else:
         logger.info(f"Using official Telegram Bot API")
     logger.info("=" * 80)
