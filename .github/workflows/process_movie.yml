@@ -85,6 +85,7 @@ jobs:
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           # Database API endpoint
           DB_API_URL: ${{ secrets.DB_API_URL }}
+          DB_API_KEY: ${{ secrets.DB_API_KEY }}
         run: |
           python github_worker.py
       
