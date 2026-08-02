@@ -18,6 +18,7 @@ import mysql.connector
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.exceptions import IncompleteRead
 
 # =====================================================
 # CONFIGURATION
@@ -507,7 +508,7 @@ def download_file(url, output_path, max_retries=None):
             
         except (requests.exceptions.ConnectionError, 
                 requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.IncompleteRead) as e:
+                IncompleteRead) as e:
             logger.error(f"❌ Connection dropped (attempt #{attempt}): {type(e).__name__}: {e}")
             if file_handle:
                 try:
