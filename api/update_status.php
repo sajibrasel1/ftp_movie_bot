@@ -15,8 +15,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-// Simple API key authentication
-define('API_KEY', 'ftp_bot_secret_2026_key_change_this');  // ⚠️ CHANGE THIS!
+// Simple API key authentication (supports both query param and header for LiteSpeed)
+define('API_KEY', '05c20c0aa18dfbe052db939637eb87fb7c13cba62c05d474c09713eb62d24d84');
 
 // Database credentials
 define('DB_HOST', 'localhost');
@@ -24,13 +24,18 @@ define('DB_USER', 'techandc_bot');
 define('DB_PASS', '12345Sajibs6@');
 define('DB_NAME', 'techandc_prompts');
 
-// Verify API key
-$headers = getallheaders();
-$provided_key = isset($headers['X-API-Key']) ? $headers['X-API-Key'] : '';
+// Verify API key (check both query param and header)
+$provided_key = '';
+if (isset($_GET['api_key'])) {
+    $provided_key = $_GET['api_key'];
+} elseif (function_exists('getallheaders')) {
+    $headers = getallheaders();
+    $provided_key = isset($headers['X-API-Key']) ? $headers['X-API-Key'] : '';
+}
 
 if ($provided_key !== API_KEY) {
     http_response_code(401);
-    echo json_encode(['error' => 'Unauthorized']);
+    echo json_encode(['error' => 'Unauthorized', 'debug' => 'Invalid API key']);
     exit;
 }
 
