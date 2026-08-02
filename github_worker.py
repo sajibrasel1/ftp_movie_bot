@@ -51,6 +51,12 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_API_URL = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org")
 
+# Telethon credentials (optional, for direct MTProto uploads)
+TELEGRAM_API_ID = os.environ.get("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH")
+TELEGRAM_PHONE_NUMBER = os.environ.get("TELEGRAM_PHONE_NUMBER")
+USE_TELETHON = os.environ.get("USE_TELETHON", "false").lower() == "true"
+
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
@@ -830,8 +836,83 @@ class StreamingFileReader:
         return self.file.read(size)
 
 
+def upload_with_telethon_sync(file_path, caption, channel_id):
+    """Upload large files using Telethon (supports 2GB without self-hosted API)"""
+    import asyncio
+    from telethon import TelegramClient
+    from telethon.tl.types import DocumentAttributeVideo
+    
+    logger.info("📤 Using Telethon for upload (supports 2GB natively)")
+    
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        raise ValueError("TELEGRAM_API_ID and TELEGRAM_API_HASH required for Telethon")
+    
+    async def do_upload():
+        client = TelegramClient('telegram_session', int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+        
+        try:
+            # Start client (will use existing session or create new one)
+            await client.start(phone=lambda: TELEGRAM_PHONE_NUMBER)
+            logger.info("✅ Connected to Telegram via Telethon")
+            
+            file_size = os.path.getsize(file_path)
+            last_progress_time = [time.time()]
+            
+            def progress_callback(current, total):
+                now = time.time()
+                if now - last_progress_time[0] >= 10:  # Log every 10 seconds
+                    percent = (current / total) * 100
+                    speed = current / (now - last_progress_time[0]) if (now - last_progress_time[0]) > 0 else 0
+                    logger.info(
+                        f"📤 Progress: {current / (1024**3):.2f} GB / {total / (1024**3):.2f} GB "
+                        f"({percent:.1f}%) | Speed: {format_speed(speed)}"
+                    )
+                    last_progress_time[0] = now
+            
+            # Upload video
+            logger.info("📤 Starting Telethon upload...")
+            message = await client.send_file(
+                int(channel_id),
+                file_path,
+                caption=caption[:1024],
+                supports_streaming=True,
+                progress_callback=progress_callback,
+                attributes=[
+                    DocumentAttributeVideo(
+                        duration=0,
+                        w=1920,
+                        h=1080,
+                        supports_streaming=True
+                    )
+                ]
+            )
+            
+            logger.info(f"✅ Telethon upload successful!")
+            logger.info(f"📨 Message ID: {message.id}")
+            
+            return message.id
+            
+        finally:
+            await client.disconnect()
+    
+    # Run async function in sync context
+    return asyncio.run(do_upload())
+
+
 def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=None, total_parts=None):
     """Upload video with retry logic and streaming"""
+    
+    # Check if we should use Telethon instead
+    file_size = os.path.getsize(file_path)
+    is_official_api = TELEGRAM_API_URL == "https://api.telegram.org"
+    
+    if USE_TELETHON or (is_official_api and file_size > 50_000_000):
+        # Use Telethon for files > 50MB on official API
+        logger.info("🔄 Switching to Telethon for large file upload")
+        caption_with_part = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}" if part_number and total_parts else caption
+        return upload_with_telethon_sync(file_path, caption_with_part, chat_id)
+    
+    # Otherwise use Bot API
     if part_number and total_parts:
         caption = f"📹 {caption}\n\n📦 Part {part_number}/{total_parts}"
     
