@@ -914,62 +914,78 @@ class StreamingFileReader:
 
 def upload_with_bot_token(file_path, caption, channel_id, bot_token):
     """
-    Upload files using Bot Token (no session file needed)
-    Supports up to 2GB using python-telegram-bot library
+    Upload files using Telethon with Bot Token (no session conflicts, 2GB support)
+    Same as before but uses bot_token instead of phone number
     """
     import asyncio
+    from telethon import TelegramClient
+    from telethon.tl.types import DocumentAttributeVideo
     
-    logger.info("Using Bot Token for upload (supports 2GB, no session conflicts)")
+    logger.info("Using Telethon with Bot Token (2GB support, no session conflicts)")
+    
+    # Get API credentials from environment
+    api_id = os.environ.get("TELEGRAM_API_ID")
+    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    
+    if not api_id or not api_hash:
+        raise ValueError("TELEGRAM_API_ID and TELEGRAM_API_HASH required for Telethon")
     
     async def do_upload():
+        # Create session for bot (different from user session)
+        client = TelegramClient('bot_session', int(api_id), api_hash)
+        
         try:
-            from telegram import Bot
-            from telegram.request import HTTPXRequest
-            
-            # Create bot with extended timeout for large files
-            request = HTTPXRequest(
-                connection_pool_size=8,
-                connect_timeout=60.0,
-                read_timeout=300.0,
-                write_timeout=300.0,
-                pool_timeout=60.0
-            )
-            
-            bot = Bot(token=bot_token, request=request)
+            # Start as BOT instead of user (no phone number needed)
+            await client.start(bot_token=bot_token)
+            logger.info("Connected to Telegram via Telethon (Bot Mode)")
             
             file_size = os.path.getsize(file_path)
-            logger.info(f"File size: {file_size / (1024**3):.2f} GB")
-            logger.info(f"Starting bot upload to channel {channel_id}...")
+            last_progress_time = [time.time()]
             
+            def progress_callback(current, total):
+                now = time.time()
+                if now - last_progress_time[0] >= 10:  # Log every 10 seconds
+                    percent = (current / total) * 100
+                    speed = current / (now - last_progress_time[0]) if (now - last_progress_time[0]) > 0 else 0
+                    logger.info(
+                        f"Upload Progress: {current / (1024**3):.2f} GB / {total / (1024**3):.2f} GB "
+                        f"({percent:.1f}%) | Speed: {format_speed(speed)}"
+                    )
+                    last_progress_time[0] = now
+            
+            # Upload video (same as before)
+            logger.info("Starting Telethon upload...")
             start_time = time.time()
             
-            # Upload as video with streaming support
-            with open(file_path, 'rb') as video_file:
-                message = await bot.send_video(
-                    chat_id=int(channel_id),
-                    video=video_file,
-                    caption=caption[:1024],
-                    supports_streaming=True,
-                    read_timeout=300,
-                    write_timeout=300,
-                    connect_timeout=60,
-                    pool_timeout=60
-                )
+            message = await client.send_file(
+                int(channel_id),
+                file_path,
+                caption=caption[:1024],
+                supports_streaming=True,
+                progress_callback=progress_callback,
+                attributes=[
+                    DocumentAttributeVideo(
+                        duration=0,
+                        w=1920,
+                        h=1080,
+                        supports_streaming=True
+                    )
+                ]
+            )
             
             elapsed = time.time() - start_time
             speed = file_size / elapsed if elapsed > 0 else 0
             
-            logger.info(f"Bot upload successful!")
-            logger.info(f"Message ID: {message.message_id}")
+            logger.info(f"Telethon upload successful!")
+            logger.info(f"Message ID: {message.id}")
             logger.info(f"Upload took {elapsed:.1f}s ({format_speed(speed)})")
             
-            return message.message_id
+            return message.id
             
-        except Exception as e:
-            logger.error(f"Bot upload failed: {e}")
-            raise
+        finally:
+            await client.disconnect()
     
-    # Run async function in sync context
+    # Run async function
     return asyncio.run(do_upload())
 
 
