@@ -62,6 +62,10 @@ MAX_MOVIES_PER_RUN = 2  # Process 2 movies at a time (faster and more stable)
 MAX_GITHUB_MINUTES_PER_MONTH = 1800
 MIN_FILE_SIZE_MB = 100  # Skip files smaller than 100MB
 
+# Scan mode (Auto-detect based on time)
+QUICK_SCAN_MODE = os.environ.get("FORCE_FULL_SCAN", "").lower() == "true"  # Set FORCE_FULL_SCAN=true for manual full scan
+FULL_SCAN_HOUR = 3  # Run full scan daily at 3 AM (when server load is low)
+
 # Logging
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
@@ -437,10 +441,117 @@ def scrape_ftp_directory_recursive(base_url, current_path="/", depth=0, visited=
     return all_movies
 
 
+def quick_scan_all_folders():
+    """Quick scan - check all main folders (English, Indian, Others) but only 1 level deep"""
+    logger.info("=" * 80)
+    logger.info("⚡ QUICK SCAN MODE - All Main Folders (1-Level Deep)")
+    logger.info("=" * 80)
+    
+    # Main folders to scan
+    main_folders = ["English", "Indian", "Others", "TV_Series"]
+    all_movies = []
+    
+    for main_folder in main_folders:
+        logger.info(f"\n📁 Scanning: {main_folder}/")
+        folder_url = f"{FTP_BASE_URL}/{main_folder}/"
+        
+        try:
+            response = requests.get(folder_url, timeout=REQUEST_TIMEOUT)
+            
+            if response.status_code != 200:
+                logger.warning(f"⚠️ {main_folder} not accessible")
+                continue
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            links = soup.find_all("a")
+            
+            # Get all subfolders
+            subfolders = []
+            for link in links:
+                href = link.get("href", "").strip()
+                if href and href.endswith("/") and not is_parent_directory(href):
+                    subfolders.append(href)
+            
+            logger.info(f"  Found {len(subfolders)} subfolders")
+            
+            # Scan each subfolder for video files (1 level only)
+            for subfolder in subfolders:
+                subfolder_url = folder_url + subfolder
+                
+                try:
+                    time.sleep(CRAWL_DELAY_SECONDS)
+                    subfolder_response = requests.get(subfolder_url, timeout=REQUEST_TIMEOUT)
+                    
+                    if subfolder_response.status_code != 200:
+                        continue
+                    
+                    subfolder_soup = BeautifulSoup(subfolder_response.text, "html.parser")
+                    subfolder_links = subfolder_soup.find_all("a")
+                    
+                    for file_link in subfolder_links:
+                        href = file_link.get("href", "").strip()
+                        filename = file_link.text.strip()
+                        
+                        if not is_video_file(filename):
+                            continue
+                        
+                        # Get file size
+                        size_text = "Unknown"
+                        size_bytes = None
+                        
+                        try:
+                            pre_tag = file_link.find_parent("pre")
+                            if pre_tag:
+                                full_text = pre_tag.get_text()
+                                for line in full_text.split("\n"):
+                                    if filename in line or href in line:
+                                        parts = line.split()
+                                        if len(parts) >= 4:
+                                            size_text = parts[-1]
+                                            size_bytes = parse_file_size(size_text)
+                                        break
+                        except Exception:
+                            pass
+                        
+                        # Skip small files
+                        if size_bytes and size_bytes < MIN_FILE_SIZE_MB * 1024 * 1024:
+                            continue
+                        
+                        file_url = subfolder_url.rstrip("/") + "/" + href
+                        metadata = parse_movie_title(filename)
+                        
+                        movie_data = {
+                            "title": metadata["title"],
+                            "url": file_url,
+                            "size_bytes": size_bytes,
+                            "size_readable": size_text,
+                            "extension": os.path.splitext(filename)[1],
+                            "quality": metadata["quality"],
+                            "year": metadata["year"],
+                            "directory": f"/{main_folder}/{subfolder}",
+                        }
+                        
+                        all_movies.append(movie_data)
+                        logger.debug(f"    ✅ {metadata['title']}")
+                
+                except Exception as e:
+                    logger.debug(f"  Error scanning {subfolder}: {e}")
+                    continue
+            
+            logger.info(f"  ✅ {main_folder} scan complete")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to scan {main_folder}: {e}")
+            continue
+    
+    logger.info(f"\n✅ Quick scan complete: {len(all_movies)} movies found across all folders")
+    return all_movies
+
+
 def scrape_all_directories():
     """Entry point for recursive crawling"""
     logger.info("=" * 80)
-    logger.info("🚀 STARTING RECURSIVE FTP CRAWL")
+    logger.info("🚀 STARTING RECURSIVE FTP CRAWL (FULL SCAN)")
     logger.info(f"Base URL: {FTP_BASE_URL}")
     logger.info(f"Max Depth: {MAX_RECURSION_DEPTH}")
     logger.info("=" * 80)
@@ -551,9 +662,21 @@ def main():
         # No pending movies - do FTP crawl to find new content
         logger.info("ℹ️ No pending movies found - starting FTP crawl...")
         
-        # Step 1: Recursive FTP crawl
-        logger.info("📡 Step 1: Recursive FTP crawl starting...")
-        scraped_movies = scrape_all_directories()
+        # Auto-detect: Full scan at specific hour, Quick scan otherwise
+        current_hour = datetime.now().hour
+        force_full = os.environ.get("FORCE_FULL_SCAN", "").lower() == "true"
+        
+        should_full_scan = force_full or (current_hour == FULL_SCAN_HOUR)
+        
+        # Step 1: FTP crawl (Auto-detect or Force mode)
+        if should_full_scan:
+            logger.info(f"🔄 Using FULL SCAN mode (scheduled at {FULL_SCAN_HOUR}:00 or forced)")
+            logger.info("⏰ This will take 5-10 minutes to discover new folders...")
+            scraped_movies = scrape_all_directories()
+        else:
+            logger.info(f"⚡ Using QUICK SCAN mode (All main folders, 1-level deep)")
+            logger.info(f"💡 Next full scan scheduled at {FULL_SCAN_HOUR}:00 AM")
+            scraped_movies = quick_scan_all_folders()
         
         # Step 2: Filter and add new movies to database
         logger.info("📊 Step 2: Processing discovered movies...")
