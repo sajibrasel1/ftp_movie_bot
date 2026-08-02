@@ -850,11 +850,10 @@ def upload_to_telegram_sync(file_path, caption, bot_token, chat_id, part_number=
                 'supports_streaming': True
             }
             
-            logger.info("📡 Starting streaming upload...")
-            
-            with StreamingFileReader(file_path) as file_reader:
+            # Use standard file open for official Telegram API (simpler and more reliable)
+            with open(file_path, 'rb') as video_file:
                 files = {
-                    'video': (Path(file_path).name, file_reader, 'video/mp4')
+                    'video': (Path(file_path).name, video_file, 'video/mp4')
                 }
                 
                 response = session.post(
