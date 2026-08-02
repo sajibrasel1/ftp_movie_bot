@@ -218,10 +218,12 @@ def update_movie_status(db_conn, status, **kwargs):
             if "error_message" in kwargs:
                 payload["error_message"] = str(kwargs["error_message"])[:500]
             
+            # Use query parameter instead of header (LiteSpeed compatibility)
+            api_url_with_key = f"{api_url}?api_key={api_key}"
+            
             response = requests.post(
-                api_url,
+                api_url_with_key,
                 json=payload,
-                headers={"X-API-Key": api_key},
                 timeout=30
             )
             
@@ -352,10 +354,12 @@ def save_message_id_immediately(db_conn, message_id):
                 "message_id": message_id
             }
             
+            # Use query parameter instead of header (LiteSpeed compatibility)
+            api_url_with_key = f"{api_url}?api_key={api_key}"
+            
             response = requests.post(
-                api_url,
+                api_url_with_key,
                 json=payload,
-                headers={"X-API-Key": api_key},
                 timeout=30
             )
             
