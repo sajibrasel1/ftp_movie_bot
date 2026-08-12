@@ -96,7 +96,17 @@ def get_chrome_driver():
     options.add_experimental_option('useAutomationExtension', False)
     options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    service = Service(ChromeDriverManager().install())
+    # Try to use chromedriver from PATH first (installed by setup-chromedriver action)
+    import shutil
+    chromedriver_path = shutil.which('chromedriver')
+    
+    if chromedriver_path:
+        logger.info(f"Using ChromeDriver from PATH: {chromedriver_path}")
+        service = Service(chromedriver_path)
+    else:
+        logger.info("Using webdriver-manager to install ChromeDriver...")
+        service = Service(ChromeDriverManager().install())
+    
     driver = webdriver.Chrome(service=service, options=options)
     
     # Override navigator.webdriver to undefined to bypass basic detection
