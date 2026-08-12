@@ -317,6 +317,8 @@ def crawl_mlsbd():
     and resolves Savelinks -> GDFlix URLs.
     Automatically detects and updates domain if current one fails.
     """
+    global MLSBD_BASE_URL  # Declare at the top of function
+    
     logger.info("🎬 Starting MLSBD Crawl...")
     movies_found = []
     
@@ -335,7 +337,6 @@ def crawl_mlsbd():
                 new_domain = auto_detect_and_update()
                 
                 if new_domain:
-                    global MLSBD_BASE_URL
                     MLSBD_BASE_URL = new_domain
                     logger.info(f"✅ Switched to new domain: {MLSBD_BASE_URL}")
                     
