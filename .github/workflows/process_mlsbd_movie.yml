@@ -43,24 +43,30 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Setup ChromeDriver
-        uses: nanasess/setup-chromedriver@v2
-        with:
-          chromedriver-version: '131.0.6778.85'
-      
-      - name: Verify ChromeDriver installation
+      - name: Setup Chrome and ChromeDriver
         run: |
-          echo "Checking ChromeDriver location..."
-          which chromedriver || echo "chromedriver not in PATH"
-          ls -la $(which chromedriver 2>/dev/null || echo "/usr/local/bin/chromedriver")
-          chromedriver --version || echo "chromedriver not executable"
-      
-      - name: Install FFmpeg and Chrome
-        run: |
+          # Install Chrome
           sudo apt-get update
-          sudo apt-get install -y ffmpeg google-chrome-stable
-          ffmpeg -version
+          sudo apt-get install -y google-chrome-stable ffmpeg
+          
+          # Get Chrome version
+          CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d'.' -f1)
+          echo "Chrome version: $CHROME_VERSION"
+          
+          # Download matching ChromeDriver
+          CHROMEDRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_VERSION}")
+          echo "ChromeDriver version: $CHROMEDRIVER_VERSION"
+          
+          wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip"
+          unzip -q chromedriver-linux64.zip
+          sudo mv chromedriver-linux64/chromedriver /usr/local/bin/
+          sudo chmod +x /usr/local/bin/chromedriver
+          rm -rf chromedriver-linux64 chromedriver-linux64.zip
+          
+          # Verify installation
+          chromedriver --version
           google-chrome --version
+          ffmpeg -version
       
       # ============================================
       # Step 2: Display Workflow Info
