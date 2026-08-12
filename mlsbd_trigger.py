@@ -320,18 +320,27 @@ def extract_poster_from_page(soup, post_url):
     try:
         # Try multiple selectors for poster image
         poster_selectors = [
-            'meta[property="og:image"]',  # Open Graph image
+            'meta[property="og:image"]',  # Open Graph image (most reliable)
+            'meta[name="twitter:image"]',  # Twitter card image
             'img.wp-post-image',          # WordPress featured image
             'img.attachment-post-thumbnail',
             '.post-thumbnail img',
-            'article img',
+            '.entry-content img:first-of-type',  # First image in content
+            'article img:first-of-type',
+            '.movie-poster img',
+            '.featured-image img',
         ]
         
         for selector in poster_selectors:
             poster_tag = soup.select_one(selector)
             if poster_tag:
-                poster_url = poster_tag.get('content') or poster_tag.get('src')
+                poster_url = poster_tag.get('content') or poster_tag.get('src') or poster_tag.get('data-src')
                 if poster_url:
+                    # Skip placeholder/logo images
+                    skip_patterns = ['mlsbdshop.png', 'logo.png', 'placeholder', 'default.jpg']
+                    if any(pattern in poster_url.lower() for pattern in skip_patterns):
+                        continue
+                    
                     # Make URL absolute if relative
                     if poster_url.startswith('//'):
                         poster_url = 'https:' + poster_url
@@ -339,10 +348,10 @@ def extract_poster_from_page(soup, post_url):
                         from urllib.parse import urljoin
                         poster_url = urljoin(post_url, poster_url)
                     
-                    logger.info(f"  🖼️ Found poster: {poster_url[:60]}...")
+                    logger.info(f"  🖼️ Found poster: {poster_url[:80]}...")
                     return poster_url
         
-        logger.warning("  ⚠️ No poster found on page")
+        logger.warning("  ⚠️ No unique poster found on page (only placeholders)")
         return None
         
     except Exception as e:
