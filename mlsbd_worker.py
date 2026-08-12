@@ -747,6 +747,9 @@ def main():
         )
         logger.info("🎉 SUCCESS! Processing completed successfully.")
         
+        # Step 5: Trigger next pending movie automatically
+        trigger_next_pending_movie()
+        
     except Exception as e:
         logger.exception(f"❌ Fatal error in processing pipeline: {e}")
         update_movie_status("failed", error_message=str(e))
@@ -756,6 +759,49 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# =====================================================
+# AUTO-TRIGGER NEXT MOVIE
+# =====================================================
+
+def trigger_next_pending_movie():
+    """
+    Trigger cPanel script to check for next pending movie.
+    This creates a continuous processing loop.
+    """
+    try:
+        logger.info("🔄 Checking for next pending movie...")
+        
+        # Simple approach: Make HTTP request to trigger endpoint
+        # Or run the trigger script directly via subprocess
+        
+        import subprocess
+        import os
+        
+        # Path to trigger script
+        trigger_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "mlsbd_trigger.py"
+        )
+        
+        if not os.path.exists(trigger_script):
+            logger.warning(f"⚠️ Trigger script not found: {trigger_script}")
+            return
+        
+        # Run in background without waiting
+        subprocess.Popen(
+            ["python3", trigger_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        
+        logger.info("✅ Next movie check triggered successfully")
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Could not trigger next movie check: {e}")
+        # Don't fail the main process if trigger fails
 
 
 # =====================================================
