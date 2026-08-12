@@ -698,11 +698,11 @@ def main():
         parts_to_upload = file_parts[parts_already_uploaded:]
         parts_to_keep = parts_to_upload.copy()
         
-        # Get thumbnail for first part (poster or video thumbnail)
-        thumbnail_path = None
-        if parts_to_upload:
-            first_video = parts_to_upload[0]
-            thumbnail_path = get_thumbnail_path(first_video, POSTER_URL)
+        # Poster/thumbnail disabled temporarily - will add back later
+        # thumbnail_path = None
+        # if parts_to_upload:
+        #     first_video = parts_to_upload[0]
+        #     thumbnail_path = get_thumbnail_path(first_video, POSTER_URL)
         
         for i, part_file in enumerate(parts_to_upload, start=parts_already_uploaded + 1):
             caption = format_movie_caption(
@@ -714,15 +714,15 @@ def main():
             
             logger.info(f"📤 Uploading part {i}/{total_parts}...")
             
-            # Use thumbnail only for first part
-            thumb = thumbnail_path if i == (parts_already_uploaded + 1) else None
+            # Thumbnail disabled for now
+            # thumb = thumbnail_path if i == (parts_already_uploaded + 1) else None
             
             message_id = upload_with_bot_token(
                 part_file,
                 caption,
                 TELEGRAM_CHAT_ID,
                 TELEGRAM_BOT_TOKEN,
-                thumbnail_path=thumb
+                thumbnail_path=None  # Disabled
             )
             
             message_ids.append(message_id)
