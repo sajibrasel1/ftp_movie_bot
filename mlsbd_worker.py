@@ -747,8 +747,8 @@ def main():
         )
         logger.info("🎉 SUCCESS! Processing completed successfully.")
         
-        # Step 5: Trigger next pending movie automatically
-        trigger_next_pending_movie()
+        # Auto-trigger disabled temporarily - will fix later
+        # trigger_next_pending_movie()
         
     except Exception as e:
         logger.exception(f"❌ Fatal error in processing pipeline: {e}")
