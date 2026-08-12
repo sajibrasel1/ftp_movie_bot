@@ -1,4 +1,4 @@
-name: MLSBD Movie Splitter & Telegram Uploader
+name: MLSBD Movie Splitter & Telegram Uploader v2
 
 # Triggered manually via GitHub API from cPanel
 on:
