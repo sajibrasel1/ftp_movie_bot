@@ -43,6 +43,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 MOVIE_ID = os.environ.get("MOVIE_ID")
 MOVIE_TITLE = os.environ.get("MOVIE_TITLE")
 MOVIE_URL = os.environ.get("MOVIE_URL")  # GDFlix URL passed as input
+POSTER_URL = os.environ.get("POSTER_URL", "")  # Movie poster URL from MLSBD
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -509,7 +510,7 @@ def format_movie_caption(title, is_split=False, part_number=None, total_parts=No
         caption += f"\n\n📦 Part {part_number}/{total_parts}"
     return caption
 
-def upload_with_bot_token(file_path, caption, channel_id, bot_token):
+def upload_with_bot_token(file_path, caption, channel_id, bot_token, thumbnail_path=None):
     from telethon import TelegramClient
     from telethon.tl.types import DocumentAttributeVideo
     
@@ -542,13 +543,15 @@ def upload_with_bot_token(file_path, caption, channel_id, bot_token):
                     last_progress_time[0] = now
                     
             start_time = time.time()
-            message = await client.send_file(
-                int(channel_id),
-                file_path,
-                caption=caption[:1024],
-                supports_streaming=True,
-                progress_callback=progress_callback,
-                attributes=[
+            
+            # Prepare send_file parameters
+            send_params = {
+                'entity': int(channel_id),
+                'file': file_path,
+                'caption': caption[:1024],
+                'supports_streaming': True,
+                'progress_callback': progress_callback,
+                'attributes': [
                     DocumentAttributeVideo(
                         duration=0,
                         w=1920,
@@ -556,7 +559,14 @@ def upload_with_bot_token(file_path, caption, channel_id, bot_token):
                         supports_streaming=True
                     )
                 ]
-            )
+            }
+            
+            # Add thumbnail if available
+            if thumbnail_path and Path(thumbnail_path).exists():
+                send_params['thumb'] = thumbnail_path
+                logger.info(f"🖼️ Using thumbnail: {thumbnail_path}")
+            
+            message = await client.send_file(**send_params)
             
             elapsed = time.time() - start_time
             speed = file_size / elapsed if elapsed > 0 else 0
@@ -578,7 +588,7 @@ def safe_cleanup(exclude_files=None):
     exclude_set = {str(Path(f).resolve()) for f in exclude_files}
     
     # Clean file patterns
-    for pattern in ["movie.*", "part_*.*"]:
+    for pattern in ["movie.*", "part_*.*", "poster.jpg", "thumbnail.jpg"]:
         for file_path in Path(".").glob(pattern):
             resolved = str(file_path.resolve())
             if resolved not in exclude_set:
@@ -688,6 +698,12 @@ def main():
         parts_to_upload = file_parts[parts_already_uploaded:]
         parts_to_keep = parts_to_upload.copy()
         
+        # Get thumbnail for first part (poster or video thumbnail)
+        thumbnail_path = None
+        if parts_to_upload:
+            first_video = parts_to_upload[0]
+            thumbnail_path = get_thumbnail_path(first_video, POSTER_URL)
+        
         for i, part_file in enumerate(parts_to_upload, start=parts_already_uploaded + 1):
             caption = format_movie_caption(
                 MOVIE_TITLE,
@@ -698,11 +714,15 @@ def main():
             
             logger.info(f"📤 Uploading part {i}/{total_parts}...")
             
+            # Use thumbnail only for first part
+            thumb = thumbnail_path if i == (parts_already_uploaded + 1) else None
+            
             message_id = upload_with_bot_token(
                 part_file,
                 caption,
                 TELEGRAM_CHAT_ID,
-                TELEGRAM_BOT_TOKEN
+                TELEGRAM_BOT_TOKEN,
+                thumbnail_path=thumb
             )
             
             message_ids.append(message_id)
@@ -736,3 +756,105 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# =====================================================
+# POSTER & THUMBNAIL FUNCTIONS
+# =====================================================
+
+def download_poster(poster_url, save_path="poster.jpg"):
+    """
+    Download movie poster from MLSBD.
+    Returns True if successful, False otherwise.
+    """
+    if not poster_url or poster_url.strip() == "":
+        logger.info("⚠️ No poster URL provided, will use video thumbnail")
+        return False
+        
+    try:
+        logger.info(f"🖼️ Downloading poster from: {poster_url[:60]}...")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(poster_url, headers=headers, timeout=15, stream=True)
+        
+        if response.status_code == 200:
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            file_size = Path(save_path).stat().st_size
+            logger.info(f"✅ Poster downloaded successfully ({file_size / 1024:.1f} KB)")
+            return True
+        else:
+            logger.warning(f"⚠️ Failed to download poster: HTTP {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error downloading poster: {e}")
+        return False
+
+def extract_video_thumbnail(video_path, thumbnail_path="thumbnail.jpg", timestamp="00:01:00"):
+    """
+    Extract a thumbnail from video using FFmpeg.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        logger.info(f"📸 Extracting thumbnail from video at {timestamp}...")
+        
+        cmd = [
+            "ffmpeg",
+            "-ss", timestamp,
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-q:v", "2",  # Quality (1-31, lower is better)
+            "-y",  # Overwrite
+            thumbnail_path
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0 and Path(thumbnail_path).exists():
+            file_size = Path(thumbnail_path).stat().st_size
+            logger.info(f"✅ Thumbnail extracted successfully ({file_size / 1024:.1f} KB)")
+            return True
+        else:
+            logger.error(f"❌ FFmpeg thumbnail extraction failed: {result.stderr[-500:]}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.error("❌ Thumbnail extraction timeout")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Error extracting thumbnail: {e}")
+        return False
+
+def get_thumbnail_path(video_path, poster_url=None):
+    """
+    Get thumbnail for video upload.
+    Priority: 1. MLSBD poster, 2. Video thumbnail, 3. None
+    Returns path to thumbnail file or None.
+    """
+    thumbnail_path = "thumbnail.jpg"
+    poster_path = "poster.jpg"
+    
+    # Try poster first
+    if poster_url:
+        if download_poster(poster_url, poster_path):
+            return poster_path
+    
+    # Fallback to video thumbnail
+    if extract_video_thumbnail(video_path, thumbnail_path):
+        return thumbnail_path
+    
+    # No thumbnail available
+    logger.warning("⚠️ No thumbnail available for upload")
+    return None
