@@ -472,7 +472,6 @@ def crawl_mlsbd():
             new_domain = auto_detect_and_update()
             
             if new_domain:
-                global MLSBD_BASE_URL
                 MLSBD_BASE_URL = new_domain
                 logger.info(f"✅ Switched to new domain: {MLSBD_BASE_URL}")
                 
