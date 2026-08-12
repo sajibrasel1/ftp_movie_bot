@@ -43,11 +43,17 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Install FFmpeg
+      - name: Setup ChromeDriver
+        uses: nanasess/setup-chromedriver@v2
+        with:
+          chromedriver-version: '131.0.6778.85'
+      
+      - name: Install FFmpeg and Chrome
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg google-chrome-stable
           ffmpeg -version
+          google-chrome --version
       
       # ============================================
       # Step 2: Display Workflow Info
