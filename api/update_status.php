@@ -91,6 +91,19 @@ try {
     exit;
 }
 
+// Determine which table to update (default to ftp_movies)
+$table = 'ftp_movies';
+if (isset($data['table'])) {
+    $requested_table = strval($data['table']);
+    if ($requested_table === 'mlsbd_movies' || $requested_table === 'ftp_movies') {
+        $table = $requested_table;
+    } else {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid table name: ' . $requested_table]);
+        exit;
+    }
+}
+
 // Handle different actions
 try {
     switch ($action) {
@@ -113,7 +126,7 @@ try {
             }
             
             // Get current message IDs
-            $stmt = $pdo->prepare("SELECT telegram_message_ids FROM ftp_movies WHERE id = ?");
+            $stmt = $pdo->prepare("SELECT telegram_message_ids FROM {$table} WHERE id = ?");
             $stmt->execute([$movie_id]);
             $row = $stmt->fetch();
             
@@ -130,7 +143,7 @@ try {
             
             // Update database
             $stmt = $pdo->prepare("
-                UPDATE ftp_movies 
+                UPDATE {$table} 
                 SET telegram_message_ids = ?, 
                     updated_at = NOW() 
                 WHERE id = ?
@@ -182,6 +195,11 @@ try {
                 $params[] = substr($data['error_message'], 0, 500);
             }
             
+            if (isset($data['direct_download_url'])) {
+                $updates[] = 'direct_download_url = ?';
+                $params[] = $data['direct_download_url'];
+            }
+            
             // Timestamp updates
             if ($status === 'completed') {
                 $updates[] = 'processing_completed_at = NOW()';
@@ -192,7 +210,7 @@ try {
             $updates[] = 'updated_at = NOW()';
             $params[] = $movie_id;
             
-            $sql = "UPDATE ftp_movies SET " . implode(', ', $updates) . " WHERE id = ?";
+            $sql = "UPDATE {$table} SET " . implode(', ', $updates) . " WHERE id = ?";
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
             
@@ -205,7 +223,7 @@ try {
         
         case 'get_uploaded_parts':
             // Get already uploaded message IDs
-            $stmt = $pdo->prepare("SELECT telegram_message_ids FROM ftp_movies WHERE id = ?");
+            $stmt = $pdo->prepare("SELECT telegram_message_ids FROM {$table} WHERE id = ?");
             $stmt->execute([$movie_id]);
             $row = $stmt->fetch();
             
