@@ -47,8 +47,8 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPO}"
 GITHUB_WORKFLOW_FILE = "process_mlsbd_movie.yml"
 
-# Site configuration
-MLSBD_BASE_URL = "https://mlsbd.co"
+# Site configuration (will be loaded from database)
+MLSBD_BASE_URL = "https://mlsbd.co"  # Fallback default
 
 # Processing limits
 MAX_MOVIES_PER_RUN = 1  # Process 1 movie at a time to avoid race conditions
@@ -106,6 +106,38 @@ def get_db_connection():
     except mysql.connector.Error as e:
         logger.error(f"Database connection failed: {e}")
         return None
+
+def get_config_value(cursor, key, default=None):
+    """Fetch configuration value from mlsbd_config table"""
+    try:
+        cursor.execute(
+            "SELECT config_value FROM mlsbd_config WHERE config_key = %s",
+            (key,)
+        )
+        result = cursor.fetchone()
+        return result[0] if result else default
+    except Exception as e:
+        logger.warning(f"Error fetching config '{key}': {e}. Using default: {default}")
+        return default
+
+def load_mlsbd_config(cursor):
+    """Load MLSBD configuration from database"""
+    global MLSBD_BASE_URL, MAX_MOVIES_PER_RUN
+    
+    # Fetch base URL from database
+    base_url = get_config_value(cursor, 'base_url', MLSBD_BASE_URL)
+    if base_url:
+        MLSBD_BASE_URL = base_url.rstrip('/')
+        logger.info(f"📡 Loaded MLSBD domain from database: {MLSBD_BASE_URL}")
+    
+    # Fetch max movies per run
+    max_movies = get_config_value(cursor, 'max_movies_per_run', str(MAX_MOVIES_PER_RUN))
+    try:
+        MAX_MOVIES_PER_RUN = int(max_movies)
+        logger.info(f"⚙️ Max movies per run: {MAX_MOVIES_PER_RUN}")
+    except ValueError:
+        logger.warning(f"Invalid max_movies_per_run value: {max_movies}")
+
 
 def check_movie_exists(cursor, gdflix_url):
     """Check if GDFlix URL already exists in database"""
@@ -283,15 +315,42 @@ def crawl_mlsbd():
     """
     Crawls MLSBD homepage, extracts new movie posts, 
     and resolves Savelinks -> GDFlix URLs.
+    Automatically detects and updates domain if current one fails.
     """
     logger.info("🎬 Starting MLSBD Crawl...")
     movies_found = []
     
     try:
+        # Try to access MLSBD with current domain
         r = requests.get(MLSBD_BASE_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        
+        # Check if request failed
         if r.status_code != 200:
-            logger.error(f"❌ Failed to load MLSBD homepage: {r.status_code}")
-            return []
+            logger.warning(f"⚠️ Current domain {MLSBD_BASE_URL} returned status {r.status_code}")
+            logger.info("🔍 Attempting auto-detection of new MLSBD domain...")
+            
+            # Import and run auto-detection
+            try:
+                from auto_detect_mlsbd_domain import auto_detect_and_update
+                new_domain = auto_detect_and_update()
+                
+                if new_domain:
+                    global MLSBD_BASE_URL
+                    MLSBD_BASE_URL = new_domain
+                    logger.info(f"✅ Switched to new domain: {MLSBD_BASE_URL}")
+                    
+                    # Retry with new domain
+                    r = requests.get(MLSBD_BASE_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+                    if r.status_code != 200:
+                        logger.error(f"❌ New domain also failed: {r.status_code}")
+                        return []
+                else:
+                    logger.error("❌ Auto-detection failed. Cannot proceed.")
+                    return []
+                    
+            except Exception as e:
+                logger.error(f"❌ Auto-detection error: {e}")
+                return []
             
         soup = BeautifulSoup(r.text, 'html.parser')
         links = soup.find_all('a', href=True)
@@ -402,8 +461,34 @@ def crawl_mlsbd():
         db_conn.commit()
         db_conn.close()
         
+    except requests.exceptions.RequestException as req_err:
+        # Network error or timeout - likely domain issue
+        logger.warning(f"⚠️ Network error accessing {MLSBD_BASE_URL}: {req_err}")
+        logger.info("🔍 Attempting auto-detection of new MLSBD domain...")
+        
+        try:
+            from auto_detect_mlsbd_domain import auto_detect_and_update
+            new_domain = auto_detect_and_update()
+            
+            if new_domain:
+                global MLSBD_BASE_URL
+                MLSBD_BASE_URL = new_domain
+                logger.info(f"✅ Switched to new domain: {MLSBD_BASE_URL}")
+                
+                # Retry crawl with new domain (recursive call, one time only)
+                logger.info("🔄 Retrying crawl with new domain...")
+                return crawl_mlsbd()
+            else:
+                logger.error("❌ Auto-detection failed. Cannot proceed.")
+                return []
+                
+        except Exception as e:
+            logger.error(f"❌ Auto-detection error: {e}")
+            return []
+    
     except Exception as e:
         logger.error(f"❌ Error scraping MLSBD homepage: {e}")
+        return []
         
     return movies_found
 
@@ -457,13 +542,16 @@ def main():
     
     db_conn = None
     try:
-        # Step 1: Connect to DB and check for pending movies first
+        # Step 1: Connect to DB and load configuration
         db_conn = get_db_connection()
         if not db_conn:
             logger.error("❌ Database connection failed. Exiting.")
             return
             
         cursor = db_conn.cursor()
+        
+        # Load MLSBD domain and settings from database
+        load_mlsbd_config(cursor)
         
         logger.info("🔍 Checking for pending/failed movies in database...")
         pending = get_pending_movies(cursor, limit=MAX_MOVIES_PER_RUN)
