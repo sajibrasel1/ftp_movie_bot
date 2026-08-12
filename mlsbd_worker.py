@@ -42,7 +42,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 MOVIE_ID = os.environ.get("MOVIE_ID")
 MOVIE_TITLE = os.environ.get("MOVIE_TITLE")
-MOVIE_URL = os.environ.get("MOVIE_URL")  # GDFlix URL passed as input
+MOVIE_URL = os.environ.get("MOVIE_URL")  # Primary download URL (usually GDFlix)
+DOWNLOAD_LINKS = os.environ.get("DOWNLOAD_LINKS", "{}")  # JSON string of all download links
 POSTER_URL = os.environ.get("POSTER_URL", "")  # Movie poster URL from MLSBD
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -198,6 +199,171 @@ def bypass_gdflix_to_direct_link(driver, gdflix_url):
         direct_link = current_url
         
     return direct_link
+
+def bypass_multicloud_to_direct_link(driver, multicloud_url):
+    """
+    Bypass MultiCloud links using Selenium.
+    Returns direct download link if found.
+    """
+    try:
+        logger.info(f"[*] Navigating to MultiCloud page: {multicloud_url} ...")
+        driver.get(multicloud_url)
+        
+        wait_for_cloudflare(driver)
+        time.sleep(5)
+        
+        logger.info("[*] Looking for download button/link...")
+        
+        # Try to find download buttons or links
+        download_selectors = [
+            "//a[contains(@class, 'download')]",
+            "//button[contains(text(), 'Download')]",
+            "//a[contains(text(), 'Download')]",
+            "//a[contains(@href, 'download')]",
+        ]
+        
+        for selector in download_selectors:
+            try:
+                elements = driver.find_elements(By.XPATH, selector)
+                for element in elements:
+                    href = element.get_attribute("href")
+                    if href and ("drive.google" in href or "googleusercontent" in href):
+                        logger.info(f"[+] Found direct link: {href[:100]}...")
+                        return href
+            except Exception:
+                continue
+        
+        # Check current URL
+        current_url = driver.current_url
+        if "googleusercontent" in current_url or "drive.google" in current_url:
+            logger.info(f"[+] Redirected to direct link: {current_url[:100]}...")
+            return current_url
+        
+        logger.warning("[-] No direct download link found on MultiCloud page")
+        return None
+        
+    except Exception as e:
+        logger.error(f"❌ Error bypassing MultiCloud: {e}")
+        return None
+
+def bypass_filepress_to_direct_link(driver, filepress_url):
+    """
+    Bypass FilePress links using Selenium.
+    Returns direct download link if found.
+    """
+    try:
+        logger.info(f"[*] Navigating to FilePress page: {filepress_url} ...")
+        driver.get(filepress_url)
+        
+        wait_for_cloudflare(driver)
+        time.sleep(5)
+        
+        logger.info("[*] Looking for download button/link...")
+        
+        # Try to find download buttons or links
+        download_selectors = [
+            "//a[contains(@class, 'btn-download')]",
+            "//button[contains(@class, 'download')]",
+            "//a[contains(text(), 'Download Now')]",
+            "//a[contains(@href, 'download')]",
+        ]
+        
+        for selector in download_selectors:
+            try:
+                elements = driver.find_elements(By.XPATH, selector)
+                for element in elements:
+                    href = element.get_attribute("href")
+                    if href and ("drive.google" in href or "googleusercontent" in href):
+                        logger.info(f"[+] Found direct link: {href[:100]}...")
+                        return href
+            except Exception:
+                continue
+        
+        # Check current URL
+        current_url = driver.current_url
+        if "googleusercontent" in current_url or "drive.google" in current_url:
+            logger.info(f"[+] Redirected to direct link: {current_url[:100]}...")
+            return current_url
+        
+        logger.warning("[-] No direct download link found on FilePress page")
+        return None
+        
+    except Exception as e:
+        logger.error(f"❌ Error bypassing FilePress: {e}")
+        return None
+
+def try_download_with_fallback(driver):
+    """
+    Try to download movie using primary URL first, then fallback to other sources.
+    Returns direct download link if successful.
+    """
+    # Parse download links JSON
+    try:
+        download_links = json.loads(DOWNLOAD_LINKS) if DOWNLOAD_LINKS else {}
+    except json.JSONDecodeError:
+        logger.warning("⚠️ Invalid DOWNLOAD_LINKS JSON, using primary URL only")
+        download_links = {}
+    
+    # Priority order for fallback
+    priority_order = ['gdflix', 'multicloud', 'filepress', 'hubcloud', 'instant']
+    
+    # Build list of URLs to try
+    urls_to_try = []
+    
+    # Add primary URL first
+    if MOVIE_URL:
+        urls_to_try.append(('primary', MOVIE_URL))
+    
+    # Add alternative sources from download_links
+    for source in priority_order:
+        if source in download_links:
+            url = download_links[source]
+            # Skip if same as primary URL
+            if url != MOVIE_URL:
+                urls_to_try.append((source, url))
+    
+    if not urls_to_try:
+        logger.error("❌ No download URLs available!")
+        return None
+    
+    logger.info(f"📋 Available download sources: {[s[0] for s in urls_to_try]}")
+    
+    # Try each source until one works
+    for source_name, source_url in urls_to_try:
+        logger.info(f"🔄 Trying {source_name}: {source_url[:80]}...")
+        
+        try:
+            direct_link = None
+            
+            if 'gdflix' in source_url.lower():
+                direct_link = bypass_gdflix_to_direct_link(driver, source_url)
+            elif 'multicloud' in source_url.lower():
+                direct_link = bypass_multicloud_to_direct_link(driver, source_url)
+            elif 'filepress' in source_url.lower():
+                direct_link = bypass_filepress_to_direct_link(driver, source_url)
+            else:
+                # Generic bypass attempt
+                logger.info(f"[*] Attempting generic bypass for {source_name}...")
+                driver.get(source_url)
+                wait_for_cloudflare(driver)
+                time.sleep(5)
+                current_url = driver.current_url
+                if "googleusercontent" in current_url:
+                    direct_link = current_url
+            
+            if direct_link:
+                logger.info(f"✅ Successfully bypassed {source_name}!")
+                return direct_link
+            else:
+                logger.warning(f"⚠️ {source_name} bypass failed, trying next source...")
+                
+        except Exception as e:
+            logger.error(f"❌ Error with {source_name}: {e}")
+            logger.info("🔄 Trying next fallback source...")
+            continue
+    
+    logger.error("❌ All download sources failed!")
+    return None
 
 # =====================================================
 # DATABASE API FUNCTIONS
@@ -723,22 +889,22 @@ def main():
     
     # Check if we need to resolve the direct URL
     if parts_already_uploaded == 0:
-        logger.info("🌐 Step 0: Resolving GDFlix Cloudflare bypass via Selenium...")
+        logger.info("🌐 Step 0: Resolving download link with fallback support...")
         driver = None
         try:
             driver = get_chrome_driver()
-            direct_download_url = bypass_gdflix_to_direct_link(driver, MOVIE_URL)
+            direct_download_url = try_download_with_fallback(driver)
             if not direct_download_url:
-                raise ValueError("Bypass resolved to empty download link")
+                raise ValueError("All download sources failed to resolve")
                 
-            logger.info(f"✅ GDFlix Bypassed! Resolved link: {direct_download_url[:100]}...")
+            logger.info(f"✅ Download link resolved! URL: {direct_download_url[:100]}...")
             
             # Save the resolved link to DB
             update_movie_status("processing", direct_download_url=direct_download_url)
             
         except Exception as e:
-            logger.exception(f"❌ Failed to bypass GDFlix: {e}")
-            update_movie_status("failed", error_message=f"GDFlix bypass failed: {str(e)}")
+            logger.exception(f"❌ Failed to resolve download link: {e}")
+            update_movie_status("failed", error_message=f"Download bypass failed: {str(e)}")
             sys.exit(1)
         finally:
             if driver:

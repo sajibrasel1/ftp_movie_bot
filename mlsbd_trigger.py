@@ -154,18 +154,22 @@ def check_movie_exists(cursor, gdflix_url):
 def insert_movie(cursor, movie_data):
     """Insert new movie into database"""
     try:
+        # Convert download_links dict to JSON string
+        download_links_json = json.dumps(movie_data.get("download_links", {})) if movie_data.get("download_links") else None
+        
         cursor.execute(
             """
             INSERT INTO mlsbd_movies 
-                (movie_title, mlsbd_url, savelinks_url, gdflix_url, poster_url,
+                (movie_title, mlsbd_url, savelinks_url, gdflix_url, download_links, poster_url,
                  quality, year, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
             """,
             (
                 movie_data["title"],
                 movie_data["mlsbd_url"],
                 movie_data["savelinks_url"],
-                movie_data["gdflix_url"],
+                movie_data.get("gdflix_url"),  # May be None if GDFlix not found
+                download_links_json,
                 movie_data.get("poster_url"),
                 movie_data["quality"],
                 movie_data["year"],
@@ -184,7 +188,7 @@ def get_pending_movies(cursor, limit=1):
     try:
         cursor.execute(
             """
-            SELECT id, movie_title, gdflix_url, poster_url
+            SELECT id, movie_title, gdflix_url, download_links, poster_url
             FROM mlsbd_movies 
             WHERE (status = 'pending' OR (status = 'failed' AND retry_count < 5))
             ORDER BY 
@@ -287,7 +291,7 @@ def clean_movie_title(text):
 def resolve_savelinks(savelinks_url, referer_url):
     """
     Resolve Savelinks.me redirect page using requests.
-    Returns the target GDFlix URL if found.
+    Returns dict of all available download links (GDFlix, MultiCloud, FilePress, etc.)
     """
     headers = HEADERS.copy()
     headers['Referer'] = referer_url
@@ -297,20 +301,38 @@ def resolve_savelinks(savelinks_url, referer_url):
         r = requests.get(savelinks_url, headers=headers, timeout=REQUEST_TIMEOUT)
         if r.status_code != 200:
             logger.warning(f"  ⚠️ Savelinks fetch failed: {r.status_code}")
-            return None
+            return {}
             
         soup = BeautifulSoup(r.text, 'html.parser')
         links = soup.find_all('a', href=True)
         
+        # Collect all download links
+        download_links = {}
+        
         for link in links:
             href = link['href']
-            if 'gdflix' in href:
-                return href
+            
+            # Identify link types
+            if 'gdflix' in href.lower():
+                download_links['gdflix'] = href
+            elif 'multicloud' in href.lower():
+                download_links['multicloud'] = href
+            elif 'filepress' in href.lower():
+                download_links['filepress'] = href
+            elif 'hubcloud' in href.lower():
+                download_links['hubcloud'] = href
+            elif 'instant.io' in href.lower():
+                download_links['instant'] = href
                 
-        return None
+        if download_links:
+            logger.info(f"  📦 Found {len(download_links)} download sources: {', '.join(download_links.keys())}")
+        else:
+            logger.warning("  ⚠️ No download links found in Savelinks page")
+                
+        return download_links
     except Exception as e:
         logger.error(f"  ❌ Error resolving Savelinks {savelinks_url}: {e}")
-        return None
+        return {}
 
 def extract_poster_from_page(soup, post_url):
     """
@@ -481,32 +503,37 @@ def crawl_mlsbd():
                     
                     logger.info(f"  🔄 Resolving quality: {quality} ...")
                     
-                    gdflix_url = resolve_savelinks(sv_url, post_url)
+                    download_links = resolve_savelinks(sv_url, post_url)
                     
-                    if gdflix_url:
-                        logger.info(f"    ✅ Resolved GDFlix: {gdflix_url}")
+                    if download_links:
+                        # Get GDFlix URL for backward compatibility
+                        gdflix_url = download_links.get('gdflix')
+                        
+                        logger.info(f"    ✅ Resolved {len(download_links)} download sources")
                         
                         movie_data = {
                             "title": full_title,
                             "mlsbd_url": post_url,
                             "savelinks_url": sv_url,
                             "gdflix_url": gdflix_url,
+                            "download_links": download_links,
                             "poster_url": poster_url,
                             "quality": quality,
                             "year": year
                         }
                         
-                        # Double-check database existence
-                        existing = check_movie_exists(cursor, gdflix_url)
+                        # Double-check database existence (check using GDFlix if available, else first available link)
+                        check_url = gdflix_url if gdflix_url else next(iter(download_links.values()))
+                        existing = check_movie_exists(cursor, check_url)
                         if not existing:
                             inserted_id = insert_movie(cursor, movie_data)
                             if inserted_id:
                                 logger.info(f"    ➕ Inserted pending movie to database: ID={inserted_id}")
                                 movies_found.append(movie_data)
                         else:
-                            logger.info(f"    ⏭️ GDFlix URL already exists in database (status: {existing[1]})")
+                            logger.info(f"    ⏭️ Download URL already exists in database (status: {existing[1]})")
                     else:
-                        logger.warning("    ❌ No GDFlix URL found for this Savelinks redirect.")
+                        logger.warning("    ❌ No download links found for this Savelinks redirect.")
                         
             except Exception as e:
                 logger.error(f"  ❌ Error scraping post page {post_url}: {e}")
@@ -548,7 +575,7 @@ def crawl_mlsbd():
 # GITHUB ACTIONS TRIGGER
 # =====================================================
 
-def trigger_github_action(movie_id, movie_title, movie_url, poster_url=None):
+def trigger_github_action(movie_id, movie_title, movie_url, download_links=None, poster_url=None):
     """Trigger GitHub Actions process_mlsbd_movie workflow"""
     if not GITHUB_TOKEN:
         logger.error("❌ GITHUB_TOKEN environment variable not set!")
@@ -562,12 +589,16 @@ def trigger_github_action(movie_id, movie_title, movie_url, poster_url=None):
         "Content-Type": "application/json",
     }
     
+    # Convert download_links dict to JSON string for GitHub Actions input
+    download_links_str = json.dumps(download_links) if download_links else ""
+    
     payload = {
         "ref": "main",
         "inputs": {
             "movie_id": str(movie_id),
             "movie_title": movie_title,
             "movie_url": movie_url,
+            "download_links": download_links_str,
             "poster_url": poster_url or "",
         }
     }
@@ -611,10 +642,16 @@ def main():
         
         if pending:
             logger.info(f"✅ Found {len(pending)} pending movie(s). Skipping crawl and processing immediately.")
-            for movie_id, movie_title, gdflix_url, poster_url in pending:
+            for movie_id, movie_title, gdflix_url, download_links_json, poster_url in pending:
                 logger.info(f"🚀 Triggering process for: {movie_title} (ID: {movie_id})")
                 
-                success = trigger_github_action(movie_id, movie_title, gdflix_url, poster_url)
+                # Parse download_links from JSON
+                download_links = json.loads(download_links_json) if download_links_json else {}
+                
+                # Use GDFlix URL as movie_url for backward compatibility
+                movie_url = gdflix_url if gdflix_url else (download_links.get('gdflix') or next(iter(download_links.values()), ''))
+                
+                success = trigger_github_action(movie_id, movie_title, movie_url, download_links, poster_url)
                 if success:
                     update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
                     db_conn.commit()

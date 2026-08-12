@@ -200,6 +200,11 @@ try {
                 $params[] = $data['direct_download_url'];
             }
             
+            if (isset($data['download_links'])) {
+                $updates[] = 'download_links = ?';
+                $params[] = json_encode($data['download_links']);
+            }
+            
             // Timestamp updates
             if ($status === 'completed') {
                 $updates[] = 'processing_completed_at = NOW()';
