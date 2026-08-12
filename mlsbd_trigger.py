@@ -157,15 +157,16 @@ def insert_movie(cursor, movie_data):
         cursor.execute(
             """
             INSERT INTO mlsbd_movies 
-                (movie_title, mlsbd_url, savelinks_url, gdflix_url, 
+                (movie_title, mlsbd_url, savelinks_url, gdflix_url, poster_url,
                  quality, year, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
             """,
             (
                 movie_data["title"],
                 movie_data["mlsbd_url"],
                 movie_data["savelinks_url"],
                 movie_data["gdflix_url"],
+                movie_data.get("poster_url"),
                 movie_data["quality"],
                 movie_data["year"],
             )
@@ -183,7 +184,7 @@ def get_pending_movies(cursor, limit=1):
     try:
         cursor.execute(
             """
-            SELECT id, movie_title, gdflix_url 
+            SELECT id, movie_title, gdflix_url, poster_url
             FROM mlsbd_movies 
             WHERE (status = 'pending' OR (status = 'failed' AND retry_count < 5))
             ORDER BY 
@@ -311,6 +312,43 @@ def resolve_savelinks(savelinks_url, referer_url):
         logger.error(f"  ❌ Error resolving Savelinks {savelinks_url}: {e}")
         return None
 
+def extract_poster_from_page(soup, post_url):
+    """
+    Extract movie poster/featured image from MLSBD post page.
+    Returns poster URL or None.
+    """
+    try:
+        # Try multiple selectors for poster image
+        poster_selectors = [
+            'meta[property="og:image"]',  # Open Graph image
+            'img.wp-post-image',          # WordPress featured image
+            'img.attachment-post-thumbnail',
+            '.post-thumbnail img',
+            'article img',
+        ]
+        
+        for selector in poster_selectors:
+            poster_tag = soup.select_one(selector)
+            if poster_tag:
+                poster_url = poster_tag.get('content') or poster_tag.get('src')
+                if poster_url:
+                    # Make URL absolute if relative
+                    if poster_url.startswith('//'):
+                        poster_url = 'https:' + poster_url
+                    elif poster_url.startswith('/'):
+                        from urllib.parse import urljoin
+                        poster_url = urljoin(post_url, poster_url)
+                    
+                    logger.info(f"  🖼️ Found poster: {poster_url[:60]}...")
+                    return poster_url
+        
+        logger.warning("  ⚠️ No poster found on page")
+        return None
+        
+    except Exception as e:
+        logger.error(f"  ❌ Error extracting poster: {e}")
+        return None
+
 def crawl_mlsbd():
     """
     Crawls MLSBD homepage, extracts new movie posts, 
@@ -399,6 +437,10 @@ def crawl_mlsbd():
                     continue
                     
                 soup_post = BeautifulSoup(r_post.text, 'html.parser')
+                
+                # Extract poster from page
+                poster_url = extract_poster_from_page(soup_post, post_url)
+                
                 post_links_found = soup_post.find_all('a', href=True)
                 
                 savelinks_list = []
@@ -440,6 +482,7 @@ def crawl_mlsbd():
                             "mlsbd_url": post_url,
                             "savelinks_url": sv_url,
                             "gdflix_url": gdflix_url,
+                            "poster_url": poster_url,
                             "quality": quality,
                             "year": year
                         }
@@ -496,7 +539,7 @@ def crawl_mlsbd():
 # GITHUB ACTIONS TRIGGER
 # =====================================================
 
-def trigger_github_action(movie_id, movie_title, movie_url):
+def trigger_github_action(movie_id, movie_title, movie_url, poster_url=None):
     """Trigger GitHub Actions process_mlsbd_movie workflow"""
     if not GITHUB_TOKEN:
         logger.error("❌ GITHUB_TOKEN environment variable not set!")
@@ -516,6 +559,7 @@ def trigger_github_action(movie_id, movie_title, movie_url):
             "movie_id": str(movie_id),
             "movie_title": movie_title,
             "movie_url": movie_url,
+            "poster_url": poster_url or "",
         }
     }
     
@@ -558,10 +602,10 @@ def main():
         
         if pending:
             logger.info(f"✅ Found {len(pending)} pending movie(s). Skipping crawl and processing immediately.")
-            for movie_id, movie_title, gdflix_url in pending:
+            for movie_id, movie_title, gdflix_url, poster_url in pending:
                 logger.info(f"🚀 Triggering process for: {movie_title} (ID: {movie_id})")
                 
-                success = trigger_github_action(movie_id, movie_title, gdflix_url)
+                success = trigger_github_action(movie_id, movie_title, gdflix_url, poster_url)
                 if success:
                     update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
                     db_conn.commit()
@@ -581,10 +625,10 @@ def main():
         if new_movies:
             # Re-fetch pending to get their IDs
             pending = get_pending_movies(cursor, limit=MAX_MOVIES_PER_RUN)
-            for movie_id, movie_title, gdflix_url in pending:
+            for movie_id, movie_title, gdflix_url, poster_url in pending:
                 logger.info(f"🚀 Triggering process for: {movie_title} (ID: {movie_id})")
                 
-                success = trigger_github_action(movie_id, movie_title, gdflix_url)
+                success = trigger_github_action(movie_id, movie_title, gdflix_url, poster_url)
                 if success:
                     update_movie_status(cursor, movie_id, "processing", github_run_id="triggered")
                     db_conn.commit()
