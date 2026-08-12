@@ -201,17 +201,15 @@ def update_movie_status(cursor, movie_id, status, github_run_id=None, error_msg=
 # =====================================================
 
 def parse_quality(text):
-    """Extract movie quality from text"""
+    """Extract movie quality from text - ONLY 720p HD"""
     text_upper = text.upper()
-    if '4K' in text_upper or '2160P' in text_upper:
-        return '4K UHD'
-    elif '1080P' in text_upper:
-        return '1080p Full HD'
-    elif '720P' in text_upper:
+    
+    # শুধু 720p accept করুন, অন্য সব skip
+    if '720P' in text_upper:
         return '720p HD'
-    elif '480P' in text_upper:
-        return '480p SD'
-    return 'HD'
+    
+    # অন্য qualities return None (will be skipped)
+    return None
 
 def parse_year(text):
     """Extract year from text"""
@@ -356,6 +354,11 @@ def crawl_mlsbd():
                 for text, sv_url in savelinks_list:
                     # Parse quality from text
                     quality = parse_quality(text)
+                    
+                    # Skip if not 720p
+                    if quality is None:
+                        continue
+                    
                     year = parse_year(raw_title)
                     base_title = clean_movie_title(raw_title)
                     
