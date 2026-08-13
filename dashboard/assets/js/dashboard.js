@@ -174,8 +174,12 @@ function startCrawl() {
 }
 
 // Retry failed movies
-function retryFailed() {
-    if (!confirm('Retry all failed movies? This will mark them as pending.')) {
+function retryFailed(autoTrigger = false) {
+    const actionText = autoTrigger 
+        ? 'Retry and trigger all failed movies?' 
+        : 'Retry all failed movies? This will mark them as pending.';
+    
+    if (!confirm(actionText)) {
         return;
     }
     
@@ -186,16 +190,20 @@ function retryFailed() {
     button.disabled = true;
     button.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Processing...';
     
+    const formData = new FormData();
+    formData.append('action', autoTrigger ? 'trigger' : 'reset');
+    
     fetch('api/retry_failed.php', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        }
+        body: formData
     })
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            showToast('Success', `${data.count} movies marked for retry`, 'success');
+            const message = autoTrigger 
+                ? `${data.count} movies reset, ${data.triggered} triggered successfully!`
+                : `${data.count} movies marked for retry`;
+            showToast('Success', message, 'success');
             
             // Refresh stats
             setTimeout(() => {
@@ -203,7 +211,7 @@ function retryFailed() {
                 location.reload();
             }, 2000);
         } else {
-            showToast('Error', data.message || 'Failed to retry movies', 'danger');
+            showToast('Error', data.error || data.message || 'Failed to retry movies', 'danger');
         }
     })
     .catch(error => {

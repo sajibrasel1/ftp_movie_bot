@@ -162,17 +162,22 @@ try {
                     </div>
                     <div class="card-body">
                         <div class="row">
-                            <div class="col-md-4 mb-2">
+                            <div class="col-md-3 mb-2">
                                 <button class="btn btn-success btn-lg w-100" onclick="startCrawl()">
                                     <i class="bi bi-arrow-clockwise"></i> Start Manual Crawl
                                 </button>
                             </div>
-                            <div class="col-md-4 mb-2">
-                                <button class="btn btn-warning btn-lg w-100" onclick="retryFailed()">
+                            <div class="col-md-3 mb-2">
+                                <button class="btn btn-warning btn-lg w-100" onclick="retryFailed(false)">
                                     <i class="bi bi-arrow-repeat"></i> Retry Failed Movies
                                 </button>
                             </div>
-                            <div class="col-md-4 mb-2">
+                            <div class="col-md-3 mb-2">
+                                <button class="btn btn-danger btn-lg w-100" onclick="retryFailed(true)">
+                                    <i class="bi bi-lightning-fill"></i> Retry & Trigger All
+                                </button>
+                            </div>
+                            <div class="col-md-3 mb-2">
                                 <button class="btn btn-info btn-lg w-100" onclick="refreshStats()">
                                     <i class="bi bi-arrow-clockwise"></i> Refresh Stats
                                 </button>

@@ -1,188 +1,130 @@
 #!/usr/bin/env python3
 """
-Auto Retry Failed Movies
-=========================
-This script automatically retries failed movies.
-Runs via cron job to check for stuck/failed movies and reset them to pending.
-
-Usage: Run via cron every 30 minutes
-*/30 * * * * cd /home/techandc/movie_bot_new/ftp_movie_bot && source set_env.sh && /home/techandc/virtualenv/movie_bot_new/3.11/bin/python auto_retry_failed.py >> logs/auto_retry.log 2>&1
+Auto-Retry Failed Movies
+Automatically resets failed movies to pending for retry
+Run this via cron every hour or as needed
 """
 
-import logging
+import os
 import sys
+import logging
+import pymysql
 from datetime import datetime, timedelta
-from pathlib import Path
 
-import mysql.connector
-
-# =====================================================
-# CONFIGURATION
-# =====================================================
-
-DB_CONFIG = {
-    "host": "localhost",
-    "user": "techandc_bot",
-    "password": "12345Sajibs6@",
-    "database": "techandc_prompts",
-}
-
-MAX_RETRY_COUNT = 5  # Maximum 5 retries
-STUCK_TIMEOUT_MINUTES = 60  # If processing for more than 60 minutes, consider it stuck
-
-# Logging
-BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-LOG_FILE = LOG_DIR / "auto_retry.log"
-
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+        logging.FileHandler('logs/auto_retry.log'),
+        logging.StreamHandler()
+    ]
 )
-logger = logging.getLogger(__name__)
 
+# Database config (load from .env or hardcode)
+DB_HOST = os.environ.get('DB_HOST', 'localhost')
+DB_USER = os.environ.get('DB_USER', 'techandc_bot')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', '12345Sajibs6@')
+DB_NAME = os.environ.get('DB_NAME', 'techandc_prompts')
+DB_TABLE = 'mlsbd_movies'
 
-# =====================================================
-# DATABASE FUNCTIONS
-# =====================================================
+# Retry config
+MAX_AUTO_RETRIES = 3  # Maximum automatic retries
+RETRY_DELAY_HOURS = 2  # Wait 2 hours before auto-retry
+
 
 def get_db_connection():
-    """Get MySQL database connection"""
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        conn.autocommit = True
-        return conn
-    except mysql.connector.Error as e:
-        logger.error(f"Database connection failed: {e}")
-        return None
+    """Get database connection"""
+    return pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        cursorclass=pymysql.cursors.DictCursor
+    )
 
 
-def reset_failed_movies(cursor):
-    """Reset failed movies to pending (if retry count < max)"""
-    try:
-        cursor.execute(
-            """
-            UPDATE ftp_movies 
-            SET status = 'pending', 
-                error_message = NULL,
-                github_run_id = NULL,
-                processing_started_at = NULL
-            WHERE status = 'failed' 
-              AND retry_count < %s
-            """,
-            (MAX_RETRY_COUNT,)
-        )
-        
-        affected_rows = cursor.rowcount
-        return affected_rows
-    except Exception as e:
-        logger.error(f"Error resetting failed movies: {e}")
-        return 0
-
-
-def reset_stuck_movies(cursor):
-    """Reset stuck movies (processing for too long)"""
-    try:
-        stuck_threshold = datetime.now() - timedelta(minutes=STUCK_TIMEOUT_MINUTES)
-        
-        cursor.execute(
-            """
-            UPDATE ftp_movies 
-            SET status = 'pending', 
-                error_message = 'Processing timeout - auto-reset',
-                retry_count = retry_count + 1,
-                github_run_id = NULL,
-                processing_started_at = NULL
-            WHERE status = 'processing' 
-              AND processing_started_at < %s
-              AND retry_count < %s
-            """,
-            (stuck_threshold, MAX_RETRY_COUNT)
-        )
-        
-        affected_rows = cursor.rowcount
-        return affected_rows
-    except Exception as e:
-        logger.error(f"Error resetting stuck movies: {e}")
-        return 0
-
-
-def get_status_summary(cursor):
-    """Get current status summary"""
-    try:
-        cursor.execute(
-            """
-            SELECT status, COUNT(*) as count 
-            FROM ftp_movies 
-            GROUP BY status
-            """
-        )
-        return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Error getting status summary: {e}")
-        return []
-
-
-# =====================================================
-# MAIN EXECUTION
-# =====================================================
-
-def main():
-    """Main execution function"""
-    logger.info("=" * 80)
-    logger.info("🔄 AUTO RETRY FAILED MOVIES - STARTING")
-    logger.info("=" * 80)
+def auto_retry_failed():
+    """
+    Find failed movies that:
+    - Have retry_count < MAX_AUTO_RETRIES
+    - Failed more than RETRY_DELAY_HOURS ago
+    Reset them to pending
+    """
     
-    db_conn = None
+    conn = get_db_connection()
+    cursor = conn.cursor()
     
     try:
-        # Connect to database
-        db_conn = get_db_connection()
-        if not db_conn:
-            logger.error("❌ Database connection failed. Exiting.")
+        # Calculate cutoff time
+        cutoff_time = datetime.now() - timedelta(hours=RETRY_DELAY_HOURS)
+        
+        # Find eligible failed movies
+        query = f"""
+            SELECT id, movie_title, retry_count, updated_at, error_message
+            FROM {DB_TABLE}
+            WHERE status = 'failed'
+            AND (retry_count IS NULL OR retry_count < %s)
+            AND updated_at < %s
+            ORDER BY id ASC
+        """
+        
+        cursor.execute(query, (MAX_AUTO_RETRIES, cutoff_time))
+        failed_movies = cursor.fetchall()
+        
+        if not failed_movies:
+            logging.info("✅ No failed movies eligible for auto-retry")
             return
         
-        cursor = db_conn.cursor()
+        logging.info(f"🔍 Found {len(failed_movies)} failed movies eligible for retry")
         
-        # Get current status
-        logger.info("📊 Current Status:")
-        status_summary = get_status_summary(cursor)
-        for status, count in status_summary:
-            logger.info(f"  {status}: {count}")
+        # Reset each movie to pending
+        reset_count = 0
+        for movie in failed_movies:
+            movie_id = movie['id']
+            movie_title = movie['movie_title']
+            retry_count = movie['retry_count'] or 0
+            error_msg = movie['error_message']
+            
+            logging.info(f"🔄 Resetting Movie #{movie_id}: {movie_title}")
+            logging.info(f"   Previous retries: {retry_count}, Error: {error_msg}")
+            
+            # Update to pending with incremented retry_count
+            update_query = f"""
+                UPDATE {DB_TABLE}
+                SET status = 'pending',
+                    error_message = NULL,
+                    retry_count = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """
+            
+            cursor.execute(update_query, (retry_count + 1, movie_id))
+            conn.commit()
+            reset_count += 1
+            
+            logging.info(f"✅ Movie #{movie_id} reset to pending (retry #{retry_count + 1})")
         
-        # Reset failed movies
-        logger.info("\n🔄 Resetting failed movies...")
-        failed_reset = reset_failed_movies(cursor)
-        logger.info(f"✅ Reset {failed_reset} failed movies to pending")
-        
-        # Reset stuck movies
-        logger.info("\n🔄 Checking for stuck processing movies...")
-        stuck_reset = reset_stuck_movies(cursor)
-        logger.info(f"✅ Reset {stuck_reset} stuck movies to pending")
-        
-        # Get updated status
-        logger.info("\n📊 Updated Status:")
-        status_summary = get_status_summary(cursor)
-        for status, count in status_summary:
-            logger.info(f"  {status}: {count}")
-        
-        logger.info("=" * 80)
-        logger.info(f"✅ AUTO RETRY COMPLETED: {failed_reset + stuck_reset} movies reset")
-        logger.info("=" * 80)
+        logging.info(f"✅ Auto-retry complete: {reset_count} movies reset to pending")
+        logging.info(f"📋 These movies will be picked up by the next crawl/trigger")
         
     except Exception as e:
-        logger.exception(f"❌ Fatal error: {e}")
-        sys.exit(1)
-        
+        logging.error(f"❌ Error during auto-retry: {e}")
+        conn.rollback()
     finally:
-        if db_conn:
-            db_conn.close()
+        cursor.close()
+        conn.close()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    logging.info("="*80)
+    logging.info("🔄 AUTO-RETRY FAILED MOVIES STARTING")
+    logging.info("="*80)
+    
+    try:
+        auto_retry_failed()
+    except Exception as e:
+        logging.error(f"❌ Fatal error: {e}")
+        sys.exit(1)
+    
+    logging.info("🎬 Auto-retry script finished")
