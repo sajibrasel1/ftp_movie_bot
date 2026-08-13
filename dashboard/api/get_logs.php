@@ -15,9 +15,10 @@ $log_type = $_GET['type'] ?? 'collect';
 $lines = intval($_GET['lines'] ?? 100);
 
 // Map log types to file paths
+// Note: collect/deliver logs are in promts project, not ftp_movie_bot
 $log_files = [
-    'collect' => PROJECT_ROOT . '/logs/cron_collect.log',
-    'deliver' => PROJECT_ROOT . '/logs/cron_deliver.log',
+    'collect' => '/home/techandc/movie_bot_new/promts/logs/cron_collect.log',
+    'deliver' => '/home/techandc/movie_bot_new/promts/logs/cron_deliver.log',
     'trigger' => PROJECT_ROOT . '/logs/mlsbd_trigger.log',
     'cron' => PROJECT_ROOT . '/logs/cron.log'
 ];
