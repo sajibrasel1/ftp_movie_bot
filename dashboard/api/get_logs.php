@@ -19,7 +19,7 @@ $log_files = [
     'collect' => PROJECT_ROOT . '/logs/cron_collect.log',
     'deliver' => PROJECT_ROOT . '/logs/cron_deliver.log',
     'trigger' => PROJECT_ROOT . '/logs/mlsbd_trigger.log',
-    'cron' => PROJECT_ROOT . '/logs/cron_collect.log'
+    'cron' => PROJECT_ROOT . '/logs/cron.log'
 ];
 
 if (!isset($log_files[$log_type])) {
