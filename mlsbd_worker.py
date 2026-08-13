@@ -691,22 +691,32 @@ def upload_with_bot_token(file_path, caption, channel_id, bot_token, thumbnail_p
     async def do_upload():
         client = TelegramClient('bot_session', int(api_id), api_hash)
         try:
-            await client.start(bot_token=bot_token)
+            # Connect with timeout
+            await asyncio.wait_for(
+                client.start(bot_token=bot_token),
+                timeout=60
+            )
             logger.info("Connected to Telegram via Telethon (Bot Mode)")
             
             file_size = os.path.getsize(file_path)
             last_progress_time = [time.time()]
+            upload_start_time = [time.time()]
             
             def progress_callback(current, total):
                 now = time.time()
                 if now - last_progress_time[0] >= 10:
                     percent = (current / total) * 100
                     speed = current / (now - last_progress_time[0]) if (now - last_progress_time[0]) > 0 else 0
+                    elapsed = now - upload_start_time[0]
                     logger.info(
                         f"Upload Progress: {current / (1024**3):.2f} GB / {total / (1024**3):.2f} GB "
-                        f"({percent:.1f}%) | Speed: {format_speed(speed)}"
+                        f"({percent:.1f}%) | Speed: {format_speed(speed)} | Elapsed: {int(elapsed)}s"
                     )
                     last_progress_time[0] = now
+                    
+                    # Check for stalled upload (no progress for 5 minutes)
+                    if elapsed > 300 and current < total * 0.1:
+                        raise TimeoutError("Upload stalled - no significant progress in 5 minutes")
                     
             start_time = time.time()
             
@@ -732,13 +742,24 @@ def upload_with_bot_token(file_path, caption, channel_id, bot_token, thumbnail_p
                 send_params['thumb'] = thumbnail_path
                 logger.info(f"🖼️ Using thumbnail: {thumbnail_path}")
             
-            message = await client.send_file(**send_params)
+            # Upload with 30 minute timeout (for large files)
+            logger.info(f"📤 Starting upload with 30-minute timeout...")
+            message = await asyncio.wait_for(
+                client.send_file(**send_params),
+                timeout=1800  # 30 minutes
+            )
             
             elapsed = time.time() - start_time
             speed = file_size / elapsed if elapsed > 0 else 0
-            logger.info(f"Telethon upload successful! Message ID: {message.id} | Speed: {format_speed(speed)}")
+            logger.info(f"✅ Telethon upload successful! Message ID: {message.id} | Speed: {format_speed(speed)}")
             return message.id
             
+        except asyncio.TimeoutError as e:
+            logger.error(f"❌ Upload timeout error: {str(e)}")
+            raise Exception(f"Telegram upload timeout: {str(e)}")
+        except TimeoutError as e:
+            logger.error(f"❌ Upload stalled error: {str(e)}")
+            raise Exception(f"Upload stalled: {str(e)}")
         finally:
             await client.disconnect()
             
