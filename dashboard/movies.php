@@ -39,7 +39,7 @@ $total_pages = ceil($total_movies / $limit);
 
 // Get movies
 $movies_query = "SELECT id, movie_title, status, quality, year, is_split, total_parts, 
-                        created_at, updated_at, processing_started_at, processing_completed_at, 
+                        file_size, created_at, updated_at, processing_started_at, processing_completed_at, 
                         error_message, retry_count
                  FROM " . DB_TABLE . " " . $where_clause . "
                  ORDER BY id DESC LIMIT ? OFFSET ?";
@@ -190,10 +190,10 @@ while ($row = $stmt->fetch()) {
                                         <th style="width: 60px;">ID</th>
                                         <th>Title</th>
                                         <th style="width: 100px;">Quality</th>
+                                        <th style="width: 100px;">Size</th>
                                         <th style="width: 100px;">Status</th>
                                         <th style="width: 80px;">Parts</th>
                                         <th style="width: 150px;">Created</th>
-                                        <th style="width: 150px;">Updated</th>
                                         <th style="width: 200px;">Actions</th>
                                     </tr>
                                 </thead>
@@ -221,6 +221,15 @@ while ($row = $stmt->fetch()) {
                                                 <span class="badge bg-info">
                                                     <?php echo $movie['quality'] ?? 'N/A'; ?>
                                                 </span>
+                                            </td>
+                                            <td>
+                                                <?php if ($movie['file_size']): ?>
+                                                    <span class="badge bg-secondary">
+                                                        <?php echo formatBytes($movie['file_size']); ?>
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span class="text-muted">-</span>
+                                                <?php endif; ?>
                                             </td>
                                             <td>
                                                 <?php
@@ -251,9 +260,6 @@ while ($row = $stmt->fetch()) {
                                             </td>
                                             <td>
                                                 <small><?php echo timeAgo($movie['created_at']); ?></small>
-                                            </td>
-                                            <td>
-                                                <small><?php echo timeAgo($movie['updated_at']); ?></small>
                                             </td>
                                             <td>
                                                 <div class="btn-group btn-group-sm" role="group">
