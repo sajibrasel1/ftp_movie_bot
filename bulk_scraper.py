@@ -86,6 +86,10 @@ def get_db():
     conn.autocommit = True
     return conn
 
+def get_dict_cursor(conn):
+    """Always return a dictionary cursor"""
+    return conn.cursor(dictionary=True)
+
 def movie_exists(cursor, savelinks_url):
     """Check if this exact savelinks URL already in DB"""
     cursor.execute(
@@ -558,7 +562,7 @@ def main():
     logger.info("=" * 70)
 
     db = get_db()
-    cursor = db.cursor(dictionary=True)
+    cursor = get_dict_cursor(db)
 
     total_inserted = 0
     total_posts = 0
