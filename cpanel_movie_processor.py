@@ -1,41 +1,37 @@
 #!/usr/bin/env python3
 """
-cPanel Direct Movie Processor
-=============================
-Posts pending movies to Telegram channel using Bot API (no Telethon session needed)
-Bot (@GetLatestMoviesBot) must be admin of @newmoviesarena4u
+cPanel Movie Processor
+======================
+Posts pending movies to @newmoviesarena4u via Bot API.
+@GetLatestMoviesBot must be admin of the channel.
 """
 
-import asyncio
 import json
 import logging
-import os
 import sys
+import time
 from pathlib import Path
 
 import mysql.connector
 import requests
 
-# =====================================================
-# CONFIGURATION
-# =====================================================
-
+# ── Config ──────────────────────────────────────────
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "techandc_bot",
+    "host":     "localhost",
+    "user":     "techandc_bot",
     "password": "12345Sajibs6@",
     "database": "techandc_prompts",
 }
 
-TELEGRAM_BOT_TOKEN = "8294665841:AAGA0fldnAJj0dazXQsa9p67HARnqACwW0E"
-TELEGRAM_CHAT_ID   = "@newmoviesarena4u"
-MOVIE_SITE_URL     = "https://movies.techandclick.site"
+BOT_TOKEN      = "8294665841:AAGA0fldnAJj0dazXQsa9p67HARnqACwW0E"
+CHAT_ID        = "@newmoviesarena4u"
+SITE_URL       = "https://movies.techandclick.site"
+BOT_API        = f"https://api.telegram.org/bot{BOT_TOKEN}"
+BATCH_SIZE     = 10
 
-BASE_DIR  = Path(__file__).resolve().parent
-LOG_DIR   = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-TEMP_DIR  = BASE_DIR / "temp_posters"
-TEMP_DIR.mkdir(exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR  = BASE_DIR / "logs";  LOG_DIR.mkdir(exist_ok=True)
+TEMP_DIR = BASE_DIR / "temp_posters"; TEMP_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,647 +41,164 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-BOT_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
-# =====================================================
-# DATABASE
-# =====================================================
-
+# ── Database ─────────────────────────────────────────
 def get_db():
     conn = mysql.connector.connect(**DB_CONFIG)
     conn.autocommit = False
     return conn
 
-def get_pending_movies(cursor, limit=5):
+def get_pending(cursor, limit):
     cursor.execute("""
         SELECT id, movie_title, slug, poster_url, quality,
                movie_size_readable, year, available_qualities
         FROM mlsbd_movies
-        WHERE status = 'pending'
-        AND poster_url IS NOT NULL
-        AND slug IS NOT NULL
-        AND (telegram_message_ids IS NULL OR telegram_message_ids = '')
+        WHERE poster_url IS NOT NULL
+          AND slug IS NOT NULL
+          AND (telegram_message_ids IS NULL OR telegram_message_ids = '')
         ORDER BY created_at ASC
         LIMIT %s
     """, (limit,))
     return cursor.fetchall()
 
-def mark_as_posted(cursor, movie_id, message_id):
+def mark_posted(cursor, movie_id, message_id):
     cursor.execute("""
         UPDATE mlsbd_movies
-        SET telegram_message_ids = %s,
-            telegram_channel_id  = %s,
+        SET telegram_message_ids    = %s,
+            telegram_channel_id     = %s,
             processing_completed_at = NOW()
         WHERE id = %s
-    """, (json.dumps([message_id]), TELEGRAM_CHAT_ID, movie_id))
+    """, (json.dumps([message_id]), CHAT_ID, movie_id))
 
-def assign_categories(cursor, movie_id, title, quality=''):
-    import re as _re
+def assign_cats(cursor, movie_id, title, quality=''):
+    import re
     t = f"{title} {quality}".lower()
-    slug_map = {
-        'bengali-movies':  _re.search(r'\b(bengali|bangla|hoichoi|chorki|bongodb|iscreen|fridaay|klikk|utshob|cinematic|bongo)\b', t),
-        'hindi-movies':    _re.search(r'\b(hindi|bollywood)\b', t),
-        'english-movies':  _re.search(r'\b(english|hollywood)\b', t),
-        'tamil-movies':    _re.search(r'\b(tamil|kollywood)\b', t),
-        'telugu-movies':   _re.search(r'\b(telugu|tollywood)\b', t),
-        'dual-audio':      _re.search(r'\bdual\s*audio\b', t),
-        'web-series':      _re.search(r'\b(s\d{2}e\d{2}|season\s*\d+|web\s*series|netflix|amazon|hoichoi|hotstar|zee5|sonyliv)\b', t),
-        '4k-ultra-hd':     _re.search(r'\b(4k|2160p)\b', t),
-        '1080p-full-hd':   _re.search(r'\b1080p?\b', t),
-        '720p-hd':         _re.search(r'\b720p?\b', t),
-        '480p':            _re.search(r'\b480p?\b', t),
+    slugs = {
+        'bengali-movies': re.search(r'\b(bengali|bangla|hoichoi|chorki|bongodb|iscreen|fridaay|klikk|utshob|bongo)\b', t),
+        'hindi-movies':   re.search(r'\b(hindi|bollywood)\b', t),
+        'english-movies': re.search(r'\b(english|hollywood)\b', t),
+        'tamil-movies':   re.search(r'\b(tamil|kollywood)\b', t),
+        'telugu-movies':  re.search(r'\b(telugu|tollywood)\b', t),
+        'dual-audio':     re.search(r'\bdual\s*audio\b', t),
+        'web-series':     re.search(r'\b(s\d{2}e\d{2}|season\s*\d+|web\s*series|netflix|amazon|hoichoi|hotstar|zee5|sonyliv)\b', t),
+        '4k-ultra-hd':    re.search(r'\b(4k|2160p)\b', t),
+        '1080p-full-hd':  re.search(r'\b1080p?\b', t),
+        '720p-hd':        re.search(r'\b720p?\b', t),
+        '480p':           re.search(r'\b480p?\b', t),
     }
-    for slug, match in slug_map.items():
-        if match:
-            try:
-                cursor.execute("SELECT id FROM movie_categories WHERE category_slug=%s LIMIT 1", (slug,))
-                row = cursor.fetchone()
-                if row:
-                    cat_id = row[0] if isinstance(row, tuple) else row['id']
-                    cursor.execute(
-                        "INSERT IGNORE INTO movie_category_links (movie_id, category_id) VALUES (%s,%s)",
-                        (movie_id, cat_id)
-                    )
-            except Exception:
-                pass
+    for slug, m in slugs.items():
+        if not m: continue
+        try:
+            cursor.execute("SELECT id FROM movie_categories WHERE category_slug=%s LIMIT 1", (slug,))
+            row = cursor.fetchone()
+            if row:
+                cid = row[0] if isinstance(row, tuple) else row['id']
+                cursor.execute(
+                    "INSERT IGNORE INTO movie_category_links (movie_id,category_id) VALUES (%s,%s)",
+                    (movie_id, cid))
+        except Exception:
+            pass
 
-# =====================================================
-# TELEGRAM BOT API
-# =====================================================
-
+# ── Telegram ──────────────────────────────────────────
 def download_poster(url, movie_id):
     try:
         r = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
-        ext = '.jpg'
-        ct = r.headers.get('Content-Type', '')
-        if 'png' in ct: ext = '.png'
-        elif 'webp' in ct: ext = '.webp'
-        path = TEMP_DIR / f"poster_{movie_id}{ext}"
-        path.write_bytes(r.content)
-        return path
+        ct  = r.headers.get('Content-Type', '')
+        ext = '.png' if 'png' in ct else '.webp' if 'webp' in ct else '.jpg'
+        p   = TEMP_DIR / f"poster_{movie_id}{ext}"
+        p.write_bytes(r.content)
+        return p
     except Exception as e:
-        logger.warning(f"Poster download failed: {e}")
+        log.warning(f"Poster download failed: {e}")
         return None
 
-def send_to_telegram(movie, poster_path):
-    """Send movie to Telegram channel via Bot API"""
-    mid, title, slug, poster_url, quality, size, year, available_qualities = movie
+def post_movie(movie, poster_path):
+    mid, title, slug, _, quality, size, year, avail_q = movie
+    url = f"{SITE_URL}/movie.php?slug={slug}"
 
-    movie_url = f"{MOVIE_SITE_URL}/movie.php?slug={slug}"
-
-    # Build qualities string
-    qualities_str = ''
-    if available_qualities:
+    # Qualities
+    qs = ''
+    if avail_q:
         try:
-            qs = json.loads(available_qualities)
-            if isinstance(qs, list): qualities_str = ' | '.join(qs)
+            lst = json.loads(avail_q)
+            if isinstance(lst, list): qs = ' | '.join(lst)
         except Exception:
             pass
-    if not qualities_str and quality:
-        qualities_str = quality
+    qs = qs or quality or ''
 
     # Caption
     lines = [f"🎬 <b>{title}</b>", ""]
-    if year:            lines.append(f"📅 {year}")
-    if qualities_str:   lines.append(f"🎞 {qualities_str}")
-    if size:            lines.append(f"💾 {size}")
+    if year: lines.append(f"📅 {year}")
+    if qs:   lines.append(f"🎞 {qs}")
+    if size: lines.append(f"💾 {size}")
     lines += ["", "👇 Watch &amp; Download"]
     caption = '\n'.join(lines)
 
-    # Inline keyboard
-    keyboard = json.dumps({
-        "inline_keyboard": [[
-            {"text": "🎬 Watch Now & Download", "url": movie_url}
-        ]]
-    })
+    kb = json.dumps({"inline_keyboard": [[{"text": "🎬 Watch Now & Download", "url": url}]]})
 
-    # Send photo with caption
     if poster_path and poster_path.exists():
         with open(poster_path, 'rb') as f:
-            resp = requests.post(
-                f"{BOT_API}/sendPhoto",
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                    "reply_markup": keyboard,
-                },
-                files={"photo": f},
-                timeout=60
-            )
+            resp = requests.post(f"{BOT_API}/sendPhoto",
+                data={"chat_id": CHAT_ID, "caption": caption,
+                      "parse_mode": "HTML", "reply_markup": kb},
+                files={"photo": f}, timeout=60)
     else:
-        resp = requests.post(
-            f"{BOT_API}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": caption,
-                "parse_mode": "HTML",
-                "reply_markup": json.loads(keyboard),
-                "disable_web_page_preview": False,
-            },
-            timeout=30
-        )
+        resp = requests.post(f"{BOT_API}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": caption,
+                  "parse_mode": "HTML", "reply_markup": json.loads(kb)},
+            timeout=30)
 
     data = resp.json()
     if data.get('ok'):
         return data['result']['message_id']
-    else:
-        raise Exception(data.get('description', 'Unknown error'))
+    raise Exception(data.get('description', 'Unknown Telegram error'))
 
-# =====================================================
-# MAIN
-# =====================================================
-
+# ── Main ──────────────────────────────────────────────
 def main():
-    logger.info("=" * 70)
-    logger.info("🎬 MOVIE PROCESSOR STARTED (Bot API)")
-    logger.info("=" * 70)
+    log.info("=" * 70)
+    log.info("🎬 MOVIE PROCESSOR STARTED (Bot API)")
+    log.info("=" * 70)
 
-    conn = get_db()
+    conn   = get_db()
     cursor = conn.cursor()
+    movies = get_pending(cursor, BATCH_SIZE)
 
-    movies = get_pending_movies(cursor, limit=10)
     if not movies:
-        logger.info("✅ No pending movies.")
-        conn.close()
-        return
+        log.info("✅ No pending movies to post.")
+        conn.close(); return
 
-    logger.info(f"📋 Found {len(movies)} pending movies")
-    success = failed = 0
+    log.info(f"📋 {len(movies)} movies to post")
+    ok = err = 0
 
     for movie in movies:
         movie_id, title = movie[0], movie[1]
-        poster_url = movie[3]
-        quality    = movie[4] or ''
-
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Processing: {title} (id={movie_id})")
-
+        log.info(f"\n{'─'*50}\n{title} (id={movie_id})")
         try:
-            assign_categories(cursor, movie_id, title, quality)
+            assign_cats(cursor, movie_id, title, movie[4] or '')
             conn.commit()
 
-            poster_path = download_poster(poster_url, movie_id) if poster_url else None
-
-            message_id = send_to_telegram(movie, poster_path)
-            mark_as_posted(cursor, movie_id, message_id)
+            poster = download_poster(movie[3], movie_id) if movie[3] else None
+            msg_id = post_movie(movie, poster)
+            mark_posted(cursor, movie_id, msg_id)
             conn.commit()
 
-            if poster_path and poster_path.exists():
-                poster_path.unlink()
-
-            logger.info(f"✅ Posted! message_id={message_id}")
-            success += 1
-            import time; time.sleep(2)  # avoid flood
+            if poster and poster.exists(): poster.unlink()
+            log.info(f"✅ Posted  msg_id={msg_id}")
+            ok += 1
+            time.sleep(2)
 
         except Exception as e:
             conn.rollback()
-            logger.error(f"❌ Failed: {e}")
-            failed += 1
+            log.error(f"❌ Failed: {e}")
+            err += 1
 
-    logger.info(f"\n{'='*70}")
-    logger.info(f"✅ Success: {success}  ❌ Failed: {failed}")
-    logger.info("=" * 70)
+    log.info(f"\n{'='*70}")
+    log.info(f"✅ Success: {ok}   ❌ Failed: {err}")
+    log.info("=" * 70)
     cursor.close()
     conn.close()
 
 if __name__ == "__main__":
     main()
-
-import logging
-import os
-import sys
-from datetime import datetime
-from pathlib import Path
-
-import mysql.connector
-import requests
-from telethon import TelegramClient, Button
-from telethon.sessions import StringSession
-
-# Import category detector
-from category_detector import CategoryDetector
-
-# =====================================================
-# CONFIGURATION
-# =====================================================
-
-# Database credentials
-DB_CONFIG = {
-    "host": "localhost",
-    "user": "techandc_bot",
-    "password": "12345Sajibs6@",
-    "database": "techandc_prompts",
-}
-
-# Telegram credentials
-TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "28186143"))
-TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "6073c3149388bbc06e818add0be1622d")
-TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", (
-    "1BVtsOJ0Bu1pxJKbdngNZprbcKPoGy5JsesQEEz6Wq_KgdkeQmkcH8Lto7vokIX"
-    "Jomxjy8k9uoXIBDZvr01VwNTbrZKJOjo9gMVHanqyeA-kEFWrS4QNi_S_miWc3F"
-    "L9Pk7F-Rr1N28jZEbu8yGx8qN774KT1J4DtA5QWkvt4_52UlU6InRiAhyBXUB_S"
-    "Ogn5Xw06xHeKDjDxrQI5A-SfwD6Yl_NA5GIeOZz4KtLc333wa_nKEXbZ2_97m0Q"
-    "3CpdsgmKS9KWaXmBqCu0s97y1nqXxHaqWh5oDBJ6048QmHedO7JMr-64W83yu4D"
-    "DLcOBIds19nki4tngGdFBCVyMb1KlavbW-rqU="
-))
-TELEGRAM_BOT_TOKEN = "8294665841:AAGA0fldnAJj0dazXQsa9p67HARnqACwW0E"
-TELEGRAM_CHANNEL = "https://t.me/newmoviesarena4u"
-TELEGRAM_CHAT_ID = "@newmoviesarena4u"
-
-# Movie website URL
-MOVIE_SITE_URL = "https://movies.techandclick.site"
-
-# Logging
-BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-LOG_FILE = LOG_DIR / "cpanel_movie_processor.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-logger = logging.getLogger(__name__)
-
-# Temp directory for posters
-TEMP_DIR = BASE_DIR / "temp_posters"
-TEMP_DIR.mkdir(exist_ok=True)
-
-# =====================================================
-# DATABASE FUNCTIONS
-# =====================================================
-
-def get_db_connection():
-    """Create database connection"""
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        conn.autocommit = False
-        return conn
-    except mysql.connector.Error as e:
-        logger.error(f"Database connection failed: {e}")
-        sys.exit(1)
-
-
-def get_pending_movies(cursor, limit=5):
-    """Get pending movies ready for Telegram posting"""
-    cursor.execute(
-        """
-        SELECT id, movie_title, slug, poster_url, quality,
-               movie_size_readable, year, download_links, mlsbd_url,
-               available_qualities
-        FROM mlsbd_movies 
-        WHERE status = 'pending'
-        AND poster_url IS NOT NULL
-        AND slug IS NOT NULL
-        AND (telegram_message_ids IS NULL OR telegram_message_ids = '')
-        ORDER BY created_at ASC
-        LIMIT %s
-        """,
-        (limit,)
-    )
-    return cursor.fetchall()
-
-
-def mark_movie_as_processing(cursor, movie_id):
-    """Mark movie as processing"""
-    cursor.execute(
-        "UPDATE mlsbd_movies SET status = 'processing', processing_started_at = NOW() WHERE id = %s",
-        (movie_id,)
-    )
-
-
-def mark_movie_as_completed(cursor, movie_id, telegram_message_id):
-    """Mark movie as posted to Telegram (keep pending status, just record message id)"""
-    cursor.execute(
-        """
-        UPDATE mlsbd_movies 
-        SET telegram_message_ids = %s,
-            telegram_channel_id = %s,
-            processing_completed_at = NOW()
-        WHERE id = %s
-        """,
-        (json.dumps([telegram_message_id]), str(TELEGRAM_CHAT_ID), movie_id)
-    )
-
-
-def assign_categories_to_movie(cursor, movie_id, movie_title):
-    """
-    Auto-detect and assign categories to movie
-    
-    Args:
-        cursor: Database cursor
-        movie_id: Movie ID
-        movie_title: Movie title for detection
-        
-    Returns:
-        list: Category slugs assigned
-    """
-    try:
-        detector = CategoryDetector()
-        
-        # Detect categories from title
-        category_slugs = detector.get_category_slugs(movie_title)
-        detected_info = detector.detect_from_title(movie_title)
-        primary_lang = detector.get_primary_language(movie_title)
-        primary_genre = detector.get_primary_genre(movie_title)
-        
-        if not category_slugs:
-            logger.warning(f"No categories detected for: {movie_title}")
-            return []
-        
-        # Update movie with detected info
-        cursor.execute(
-            """
-            UPDATE mlsbd_movies
-            SET detected_categories = %s,
-                language = %s,
-                genre = %s
-            WHERE id = %s
-            """,
-            (json.dumps(detected_info), primary_lang, primary_genre, movie_id)
-        )
-        
-        # Get category IDs from slugs
-        placeholders = ','.join(['%s'] * len(category_slugs))
-        cursor.execute(
-            f"""
-            SELECT id, category_slug
-            FROM movie_categories
-            WHERE category_slug IN ({placeholders})
-            AND is_active = 1
-            """,
-            category_slugs
-        )
-        
-        categories = cursor.fetchall()
-        
-        if not categories:
-            logger.warning(f"No matching categories in database for: {', '.join(category_slugs)}")
-            return []
-        
-        # Link movie to categories
-        assigned_slugs = []
-        for cat_id, cat_slug in categories:
-            try:
-                cursor.execute(
-                    """
-                    INSERT IGNORE INTO movie_category_links (movie_id, category_id)
-                    VALUES (%s, %s)
-                    """,
-                    (movie_id, cat_id)
-                )
-                assigned_slugs.append(cat_slug)
-            except mysql.connector.IntegrityError:
-                pass  # Already exists
-        
-        logger.info(f"✅ Assigned categories: {', '.join(assigned_slugs)}")
-        return assigned_slugs
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to assign categories: {e}")
-        return []
-
-
-def mark_movie_as_failed(cursor, movie_id, error_message):
-    """Mark movie as failed"""
-    cursor.execute(
-        """
-        UPDATE mlsbd_movies 
-        SET status = 'failed',
-            error_message = %s,
-            retry_count = retry_count + 1,
-            last_retry_at = NOW()
-        WHERE id = %s
-        """,
-        (error_message[:1000], movie_id)
-    )
-
-
-# =====================================================
-# POSTER DOWNLOAD
-# =====================================================
-
-def download_poster(poster_url, movie_id):
-    """Download poster image from URL"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(poster_url, headers=headers, timeout=30, stream=True)
-        response.raise_for_status()
-        
-        # Determine file extension
-        content_type = response.headers.get('Content-Type', '')
-        if 'jpeg' in content_type or 'jpg' in content_type:
-            ext = '.jpg'
-        elif 'png' in content_type:
-            ext = '.png'
-        elif 'webp' in content_type:
-            ext = '.webp'
-        else:
-            ext = '.jpg'  # Default
-        
-        # Save to temp file
-        poster_path = TEMP_DIR / f"poster_{movie_id}{ext}"
-        
-        with open(poster_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        logger.info(f"✅ Poster downloaded: {poster_path}")
-        return poster_path
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to download poster: {e}")
-        return None
-
-
-# =====================================================
-# TELEGRAM POSTING
-# =====================================================
-
-async def post_movie_to_telegram(client, movie, poster_path):
-    """Post movie to Telegram with poster and website link"""
-    try:
-        movie_id, movie_title, slug, poster_url, quality, size, year, download_links, mlsbd_url, available_qualities = movie
-
-        # Build movie page URL
-        movie_url = f"{MOVIE_SITE_URL}/movie.php?slug={slug}"
-
-        # Parse available qualities
-        qualities_str = ''
-        if available_qualities:
-            try:
-                qs = json.loads(available_qualities)
-                if isinstance(qs, list) and qs:
-                    qualities_str = ' | '.join(qs)
-            except Exception:
-                pass
-        if not qualities_str and quality:
-            qualities_str = quality
-
-        # Build caption
-        caption_lines = [
-            f"🎬 **{movie_title}**",
-            "",
-        ]
-        if year:
-            caption_lines.append(f"📅 {year}")
-        if qualities_str:
-            caption_lines.append(f"🎞 {qualities_str}")
-        if size:
-            caption_lines.append(f"💾 {size}")
-
-        caption_lines += [
-            "",
-            "👇 Watch & Download",
-        ]
-        caption = '\n'.join(caption_lines)
-
-        # Inline button
-        buttons = [[Button.url("🎬 Watch Now & Download", movie_url)]]
-
-        # Send with poster or text-only
-        if poster_path and poster_path.exists():
-            message = await client.send_file(
-                TELEGRAM_CHAT_ID,
-                file=str(poster_path),
-                caption=caption,
-                buttons=buttons,
-                parse_mode='md'
-            )
-        else:
-            message = await client.send_message(
-                TELEGRAM_CHAT_ID,
-                caption,
-                buttons=buttons,
-                parse_mode='md'
-            )
-
-        logger.info(f"✅ Posted to Telegram: {movie_title} (msg_id={message.id})")
-        return message.id
-
-    except Exception as e:
-        logger.error(f"❌ Failed to post to Telegram: {e}")
-        return None
-
-
-# =====================================================
-# MAIN PROCESSING
-# =====================================================
-
-async def process_movies():
-    """Main processing function"""
-    logger.info("=" * 80)
-    logger.info("🎬 CPANEL MOVIE PROCESSOR STARTED")
-    logger.info("=" * 80)
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        # Get pending movies
-        movies = get_pending_movies(cursor, limit=5)
-        
-        if not movies:
-            logger.info("✅ No pending movies. All caught up!")
-            return
-        
-        logger.info(f"📋 Found {len(movies)} pending movies")
-        
-        # Initialize Telegram client - use bot token for posting
-        client = TelegramClient(
-            StringSession(TELEGRAM_SESSION) if TELEGRAM_SESSION else "cpanel_processor",
-            TELEGRAM_API_ID,
-            TELEGRAM_API_HASH
-        )
-        
-        await client.start(bot_token=TELEGRAM_BOT_TOKEN)
-        logger.info("✅ Connected to Telegram as Bot")
-        
-        # Process each movie
-        success_count = 0
-        failed_count = 0
-        
-        for movie in movies:
-            movie_id = movie[0]
-            movie_title = movie[1]
-            poster_url = movie[3]
-            
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Processing: {movie_title}")
-            logger.info(f"Movie ID: {movie_id}")
-            
-            try:
-                # Mark as processing
-                mark_movie_as_processing(cursor, movie_id)
-                conn.commit()
-                
-                # Auto-assign categories
-                logger.info("🏷️  Detecting and assigning categories...")
-                assigned_categories = assign_categories_to_movie(cursor, movie_id, movie_title)
-                conn.commit()
-                
-                # Download poster
-                poster_path = None
-                if poster_url:
-                    poster_path = download_poster(poster_url, movie_id)
-                
-                # Post to Telegram
-                message_id = await post_movie_to_telegram(client, movie, poster_path)
-                
-                if message_id:
-                    # Mark as completed
-                    mark_movie_as_completed(cursor, movie_id, message_id)
-                    conn.commit()
-                    success_count += 1
-                    logger.info(f"✅ Movie {movie_id} completed successfully")
-                    
-                    # Cleanup poster
-                    if poster_path and poster_path.exists():
-                        poster_path.unlink()
-                else:
-                    raise Exception("Failed to post to Telegram")
-                
-                # Wait between posts
-                await asyncio.sleep(3)
-                
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"❌ Failed to process movie {movie_id}: {error_msg}")
-                
-                # Mark as failed
-                mark_movie_as_failed(cursor, movie_id, error_msg)
-                conn.commit()
-                failed_count += 1
-        
-        logger.info("=" * 80)
-        logger.info(f"✅ Success: {success_count}")
-        logger.info(f"❌ Failed: {failed_count}")
-        logger.info("=" * 80)
-        
-        await client.disconnect()
-        
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        conn.rollback()
-    finally:
-        cursor.close()
-        conn.close()
-
-
-# =====================================================
-# ENTRY POINT
-# =====================================================
-
-if __name__ == "__main__":
-    asyncio.run(process_movies())
