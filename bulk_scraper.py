@@ -42,7 +42,7 @@ DB_CONFIG = {
     "database": "techandc_prompts",
 }
 
-MLSBD_BASE_URL = "https://mlsbd.shop"  # Current working domain
+MLSBD_BASE_URL = "https://mlsbd.co"  # Current working domain
 REQUEST_TIMEOUT = 15
 CRAWL_DELAY = 1.5  # seconds between requests
 
@@ -179,22 +179,49 @@ def clean_title(text):
     return title
 
 def get_poster(soup, post_url):
-    """Extract poster image URL"""
-    for selector in [
-        'meta[property="og:image"]',
-        'meta[name="twitter:image"]',
-        'img.wp-post-image',
-        '.entry-content img:first-of-type',
-    ]:
-        tag = soup.select_one(selector)
-        if tag:
-            url = tag.get('content') or tag.get('src') or tag.get('data-src')
-            if url and not any(x in url.lower() for x in ['logo', 'placeholder', 'default']):
-                if url.startswith('//'):
-                    url = 'https:' + url
-                elif url.startswith('/'):
-                    url = urljoin(post_url, url)
-                return url
+    """Extract poster image URL - skip generic/placeholder images"""
+    SKIP_IMAGES = ['mlsbdshop.png', 'logo', 'placeholder', 'default', 'banner', 'noimage']
+
+    # Try all image sources in priority order
+    candidates = []
+
+    # 1. og:image meta tag
+    og = soup.select_one('meta[property="og:image"]')
+    if og and og.get('content'):
+        candidates.append(og['content'])
+
+    # 2. twitter:image
+    tw = soup.select_one('meta[name="twitter:image"]')
+    if tw and tw.get('content'):
+        candidates.append(tw['content'])
+
+    # 3. All images in post content
+    for img in soup.select('.entry-content img, .post-content img, article img'):
+        src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+        if src:
+            candidates.append(src)
+
+    # 4. wp-post-image
+    wp_img = soup.select_one('img.wp-post-image')
+    if wp_img:
+        src = wp_img.get('src') or wp_img.get('data-src')
+        if src:
+            candidates.append(src)
+
+    # Return first non-generic image
+    for url in candidates:
+        url = url.strip()
+        if not url:
+            continue
+        if any(skip in url.lower() for skip in SKIP_IMAGES):
+            continue
+        if url.startswith('//'):
+            url = 'https:' + url
+        elif url.startswith('/'):
+            url = urljoin(post_url, url)
+        if url.startswith('http'):
+            return url
+
     return None
 
 def resolve_savelinks(sv_url, referer):
@@ -276,6 +303,17 @@ def get_post_links_from_page(page_num):
         logger.error(f"Page {page_num} error: {e}")
         return []
 
+def is_web_series(title):
+    """Check if post is a web series (has episode pattern)"""
+    return bool(re.search(r'\bS\d{2}E\d{2}\b|\bSeason\s*\d+\b|\bEpisode\s*\d+\b|\bS\d+E\d+\b', title, re.IGNORECASE))
+
+def get_episode_number(text):
+    """Extract episode number from text for sorting"""
+    match = re.search(r'E(\d+)', text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return 0
+
 def scrape_post(raw_title, post_url, cursor, dry_run=False):
     """Scrape a single movie post and insert all qualities"""
     inserted = 0
@@ -290,23 +328,61 @@ def scrape_post(raw_title, post_url, cursor, dry_run=False):
         poster_url = get_poster(soup, post_url)
         base_title = clean_title(raw_title)
         year = parse_year(raw_title)
+        series = is_web_series(raw_title)
 
         # Find all savelinks
-        savelinks = []
+        all_savelinks = []
         for a in soup.find_all('a', href=True):
             if 'savelinks.me' in a['href']:
-                savelinks.append((a.text.strip(), a['href']))
+                link_text = a.text.strip()
+                # Skip "Watch Online" duplicates
+                if 'watch online' in link_text.lower():
+                    continue
+                all_savelinks.append((link_text, a['href']))
 
-        if not savelinks:
+        if not all_savelinks:
             logger.debug(f"  No savelinks found: {raw_title}")
             return 0
+
+        if series:
+            # Web Series: group savelinks by episode, take only latest episode
+            # Each episode has: Download 720p, Download 1080p (2-4 links per episode)
+            # Detect episode groups by looking at URL patterns
+            episode_groups = {}  # ep_num -> [(link_text, sv_url)]
+            no_ep_links = []
+
+            for link_text, sv_url in all_savelinks:
+                ep_match = re.search(r'E(\d+)', raw_title, re.IGNORECASE)
+                ep_num = ep_match.group(1) if ep_match else '01'
+                if ep_num not in episode_groups:
+                    episode_groups[ep_num] = []
+                episode_groups[ep_num].append((link_text, sv_url))
+
+            # Since all links are for the post's episode (title has Exx),
+            # just take all unique savelinks (deduplicate by URL)
+            seen_urls = set()
+            savelinks = []
+            for link_text, sv_url in all_savelinks:
+                if sv_url not in seen_urls:
+                    seen_urls.add(sv_url)
+                    savelinks.append((link_text, sv_url))
+
+            logger.info(f"  Web Series detected. Using {len(savelinks)} unique links from title episode")
+        else:
+            # Regular movie: deduplicate by URL
+            seen_urls = set()
+            savelinks = []
+            for link_text, sv_url in all_savelinks:
+                if sv_url not in seen_urls:
+                    seen_urls.add(sv_url)
+                    savelinks.append((link_text, sv_url))
 
         for link_text, sv_url in savelinks:
             quality = parse_quality(link_text)
             if not quality:
                 quality = parse_quality(raw_title)
             if not quality:
-                quality = '720p HD'  # Default
+                quality = '720p HD'
 
             # Skip if already in DB
             if movie_exists(cursor, sv_url):
