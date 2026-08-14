@@ -45,10 +45,19 @@ DB_CONFIG = {
 }
 
 # Telegram credentials
-TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "YOUR_API_ID"))
-TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "YOUR_API_HASH")
-TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", "")
-TELEGRAM_CHAT_ID = -1003916118619  # Your group ID
+TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "28186143"))
+TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "6073c3149388bbc06e818add0be1622d")
+TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", (
+    "1BVtsOJ0Bu1pxJKbdngNZprbcKPoGy5JsesQEEz6Wq_KgdkeQmkcH8Lto7vokIX"
+    "Jomxjy8k9uoXIBDZvr01VwNTbrZKJOjo9gMVHanqyeA-kEFWrS4QNi_S_miWc3F"
+    "L9Pk7F-Rr1N28jZEbu8yGx8qN774KT1J4DtA5QWkvt4_52UlU6InRiAhyBXUB_S"
+    "Ogn5Xw06xHeKDjDxrQI5A-SfwD6Yl_NA5GIeOZz4KtLc333wa_nKEXbZ2_97m0Q"
+    "3CpdsgmKS9KWaXmBqCu0s97y1nqXxHaqWh5oDBJ6048QmHedO7JMr-64W83yu4D"
+    "DLcOBIds19nki4tngGdFBCVyMb1KlavbW-rqU="
+))
+TELEGRAM_BOT_TOKEN = "8294665841:AAGA0fldnAJj0dazXQsa9p67HARnqACwW0E"
+TELEGRAM_CHANNEL = "https://t.me/newmoviesarena4u"
+TELEGRAM_CHAT_ID = "@newmoviesarena4u"  # Channel username
 
 # Movie website URL
 MOVIE_SITE_URL = "https://movies.techandclick.site"
