@@ -558,7 +558,7 @@ def main():
     logger.info("=" * 70)
 
     db = get_db()
-    cursor = db.cursor()
+    cursor = db.cursor(dictionary=True)
 
     total_inserted = 0
     total_posts = 0
