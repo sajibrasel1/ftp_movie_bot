@@ -345,29 +345,29 @@ def scrape_post(raw_title, post_url, cursor, dry_run=False):
             return 0
 
         if series:
-            # Web Series: group savelinks by episode, take only latest episode
-            # Each episode has: Download 720p, Download 1080p (2-4 links per episode)
-            # Detect episode groups by looking at URL patterns
-            episode_groups = {}  # ep_num -> [(link_text, sv_url)]
-            no_ep_links = []
+            # Web Series: MLSBD stores ALL episodes on one page
+            # Title has the LATEST episode (e.g., S03E70, S01E47)
+            # We only want savelinks for THAT specific episode
+            # Each episode has exactly 2-4 download links (one per quality)
+            # Strategy: count total qualities in title, take only that many unique links
 
-            for link_text, sv_url in all_savelinks:
-                ep_match = re.search(r'E(\d+)', raw_title, re.IGNORECASE)
-                ep_num = ep_match.group(1) if ep_match else '01'
-                if ep_num not in episode_groups:
-                    episode_groups[ep_num] = []
-                episode_groups[ep_num].append((link_text, sv_url))
+            # Count qualities mentioned in title
+            quality_count = sum(1 for q in ['480p', '720p', '1080p', '4k', '2160p']
+                                if q.lower() in raw_title.lower())
+            if quality_count == 0:
+                quality_count = 2  # fallback: at least 720p + 1080p
 
-            # Since all links are for the post's episode (title has Exx),
-            # just take all unique savelinks (deduplicate by URL)
+            # Deduplicate by URL first
             seen_urls = set()
-            savelinks = []
+            unique_links = []
             for link_text, sv_url in all_savelinks:
                 if sv_url not in seen_urls:
                     seen_urls.add(sv_url)
-                    savelinks.append((link_text, sv_url))
+                    unique_links.append((link_text, sv_url))
 
-            logger.info(f"  Web Series detected. Using {len(savelinks)} unique links from title episode")
+            # Take only the FIRST `quality_count` links = latest episode
+            savelinks = unique_links[:quality_count]
+            logger.info(f"  Web Series: {len(all_savelinks)} total links → taking first {len(savelinks)} (latest episode)")
         else:
             # Regular movie: deduplicate by URL
             seen_urls = set()
