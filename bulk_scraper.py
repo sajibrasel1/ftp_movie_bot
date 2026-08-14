@@ -181,7 +181,7 @@ def insert_movie(cursor, data, dry_run=False):
             except Exception:
                 qv = {}
             qv[quality] = {
-                'size': data.get('movie_size_readable', 'Unknown'),
+                'size': data.get('movie_size_readable') or data.get('size') or '',
                 'download_links': dl,
                 'mlsbd_url': data.get('mlsbd_url', ''),
                 'savelinks_url': data.get('savelinks_url', ''),
