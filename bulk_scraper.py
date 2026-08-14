@@ -103,7 +103,44 @@ def get_existing_by_base_title(cursor, base_title):
     )
     return cursor.fetchone()
 
-def insert_movie(cursor, data, dry_run=False):
+def assign_categories(cursor, movie_id, title, quality=''):
+    """Auto-detect and assign categories to a movie"""
+    import re as _re
+    t = f"{title} {quality}".lower()
+    
+    slug_map = {
+        'bengali-movies':  _re.search(r'\b(bengali|bangla|hoichoi|chorki|bongodb|iscreen|fridaay|klikk|utshob|cinematic|bongo)\b', t),
+        'hindi-movies':    _re.search(r'\b(hindi|bollywood)\b', t),
+        'english-movies':  _re.search(r'\b(english|hollywood)\b', t),
+        'tamil-movies':    _re.search(r'\b(tamil|kollywood)\b', t),
+        'telugu-movies':   _re.search(r'\b(telugu|tollywood)\b', t),
+        'dual-audio':      _re.search(r'\bdual\s*audio\b', t),
+        'web-series':      _re.search(r'\b(s\d{2}e\d{2}|season\s*\d+|web\s*series|netflix|amazon|hoichoi|hotstar|zee5|sonyliv)\b', t),
+        '4k-ultra-hd':     _re.search(r'\b(4k|2160p)\b', t),
+        '1080p-full-hd':   _re.search(r'\b1080p?\b', t),
+        '720p-hd':         _re.search(r'\b720p?\b', t),
+        '480p':            _re.search(r'\b480p?\b', t),
+        'action':          _re.search(r'\baction\b', t),
+        'comedy':          _re.search(r'\bcomedy\b', t),
+        'drama':           _re.search(r'\bdrama\b', t),
+    }
+    
+    for slug, match in slug_map.items():
+        if match:
+            try:
+                cursor.execute(
+                    "SELECT id FROM movie_categories WHERE category_slug=%s LIMIT 1",
+                    (slug,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    cat_id = row['id'] if isinstance(row, dict) else row[0]
+                    cursor.execute(
+                        "INSERT IGNORE INTO movie_category_links (movie_id, category_id) VALUES (%s, %s)",
+                        (movie_id, cat_id)
+                    )
+            except Exception:
+                pass
     """
     Smart insert: if same base_movie_title exists, merge the new quality into it.
     Otherwise insert a new row. Never creates duplicate movies.
@@ -487,6 +524,7 @@ def scrape_post(raw_title, post_url, cursor, dry_run=False):
             movie_id = insert_movie(cursor, movie_data, dry_run)
             if movie_id:
                 logger.info(f"  ✅ Inserted [{quality}]: {full_title}")
+                assign_categories(cursor, movie_id, base_title, quality)
                 inserted += 1
 
     except Exception as e:
