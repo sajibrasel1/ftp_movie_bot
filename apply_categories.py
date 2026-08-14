@@ -16,12 +16,47 @@ from category_detector import CategoryDetector
 # Database configuration
 DB_CONFIG = {
     'host': 'localhost',
-    'user': 'root',
-    'password': '',
+    'user': 'techandc_bot',
+    'password': '12345Sajibs6@',
     'database': 'techandc_prompts',
     'charset': 'utf8mb4',
     'collation': 'utf8mb4_unicode_ci'
 }
+
+def ensure_categories_exist(cursor, conn):
+    """Insert default categories if table is empty"""
+    cursor.execute("SELECT COUNT(*) as cnt FROM movie_categories")
+    row = cursor.fetchone()
+    if row['cnt'] > 0:
+        return  # Already has data
+
+    print("📂 movie_categories is empty — inserting default categories...")
+    default_categories = [
+        # (category_name, category_slug, icon, display_order)
+        ('Bengali Movies',    'bengali-movies',  'fa-language',     1),
+        ('Hindi Movies',      'hindi-movies',    'fa-film',         2),
+        ('English Movies',    'english-movies',  'fa-video',        3),
+        ('Tamil Movies',      'tamil-movies',    'fa-film',         4),
+        ('Telugu Movies',     'telugu-movies',   'fa-film',         5),
+        ('Dual Audio',        'dual-audio',      'fa-headphones',   6),
+        ('Web Series',        'web-series',      'fa-tv',           7),
+        ('4K Ultra HD',       '4k-ultra-hd',     'fa-star',         8),
+        ('1080p Full HD',     '1080p-full-hd',   'fa-hd-video',     9),
+        ('720p HD',           '720p-hd',         'fa-hd-video',     10),
+        ('480p',              '480p',            'fa-check-circle', 11),
+        ('Action',            'action',          'fa-bolt',         12),
+        ('Comedy',            'comedy',          'fa-laugh',        13),
+        ('Drama',             'drama',           'fa-theater-masks',14),
+    ]
+    for name, slug, icon, order in default_categories:
+        cursor.execute("""
+            INSERT IGNORE INTO movie_categories
+                (category_name, category_slug, icon, display_order, is_active)
+            VALUES (%s, %s, %s, %s, 1)
+        """, (name, slug, icon, order))
+    conn.commit()
+    print(f"   ✅ Inserted {len(default_categories)} default categories\n")
+
 
 def apply_categories_to_movies():
     """Apply categories to all existing movies"""
@@ -42,6 +77,9 @@ def apply_categories_to_movies():
         movies = cursor.fetchall()
         
         print(f"📊 Found {len(movies)} movies to process\n")
+        
+        # Ensure default categories exist
+        ensure_categories_exist(cursor, conn)
         
         detector = CategoryDetector()
         processed = 0

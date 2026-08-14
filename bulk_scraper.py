@@ -87,10 +87,18 @@ def get_db():
     return conn
 
 def movie_exists(cursor, savelinks_url):
-    """Check if movie already in DB by savelinks URL"""
+    """Check if movie already in DB by savelinks URL or by base_title+quality"""
     cursor.execute(
         "SELECT id FROM mlsbd_movies WHERE savelinks_url = %s OR mlsbd_url = %s",
         (savelinks_url, savelinks_url)
+    )
+    return cursor.fetchone() is not None
+
+def movie_exists_by_title_quality(cursor, base_title, quality):
+    """Check if a movie with same base title + quality already exists"""
+    cursor.execute(
+        "SELECT id FROM mlsbd_movies WHERE base_movie_title = %s AND quality = %s LIMIT 1",
+        (base_title, quality)
     )
     return cursor.fetchone() is not None
 
@@ -384,9 +392,14 @@ def scrape_post(raw_title, post_url, cursor, dry_run=False):
             if not quality:
                 quality = '720p HD'
 
-            # Skip if already in DB
+            # Skip if already in DB (by savelinks URL)
             if movie_exists(cursor, sv_url):
-                logger.debug(f"  Already exists: {sv_url}")
+                logger.debug(f"  Already exists (url): {sv_url}")
+                continue
+
+            # Skip if same base_title + quality already in DB
+            if movie_exists_by_title_quality(cursor, base_title, quality):
+                logger.debug(f"  Already exists (title+quality): {base_title} [{quality}]")
                 continue
 
             # Build full title

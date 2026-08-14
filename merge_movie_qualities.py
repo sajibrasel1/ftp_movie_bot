@@ -25,8 +25,8 @@ import mysql.connector
 # Database configuration
 DB_CONFIG = {
     'host': 'localhost',
-    'user': 'root',
-    'password': '',
+    'user': 'techandc_bot',
+    'password': '12345Sajibs6@',
     'database': 'techandc_prompts',
     'charset': 'utf8mb4',
     'collation': 'utf8mb4_unicode_ci'
@@ -77,13 +77,12 @@ def merge_duplicate_movies():
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor(dictionary=True)
         
-        # Get all movies
+        # Get all movies (all statuses)
         cursor.execute("""
             SELECT id, movie_title, slug, quality, movie_size_readable, 
                    download_links, poster_url, mlsbd_url, year,
-                   created_at, status
+                   created_at, status, base_movie_title
             FROM mlsbd_movies
-            WHERE status = 'completed'
             ORDER BY movie_title, quality
         """)
         
@@ -91,12 +90,22 @@ def merge_duplicate_movies():
         print(f"📊 Found {len(all_movies)} movies to process\n")
         
         # Group movies by base title
+        # Priority: use base_movie_title column if available, else extract from movie_title
         movie_groups = defaultdict(list)
         
         for movie in all_movies:
-            base_title, detected_quality = extract_base_title_and_quality(movie['movie_title'])
+            # Use base_movie_title column if available and set
+            base_from_db = movie.get('base_movie_title')
+            if base_from_db and base_from_db.strip():
+                base_title = base_from_db.strip()
+            else:
+                base_title, _ = extract_base_title_and_quality(movie['movie_title'])
+            
+            # Also strip quality from base_title if it slipped through
+            base_title, _ = extract_base_title_and_quality(base_title)
             
             # Use detected quality if available, else use database quality
+            _, detected_quality = extract_base_title_and_quality(movie['movie_title'])
             final_quality = detected_quality or movie['quality']
             
             movie_groups[base_title].append({
@@ -163,13 +172,15 @@ def merge_duplicate_movies():
                 SET base_movie_title = %s,
                     available_qualities = %s,
                     quality_variants = %s,
-                    movie_title = %s
+                    movie_title = %s,
+                    quality = %s
                 WHERE id = %s
             """, (
                 base_title,
                 json.dumps(available_qualities),
                 json.dumps(quality_variants),
                 base_title,  # Clean title without quality
+                available_qualities[0] if available_qualities else primary['quality'],  # best quality
                 primary['id']
             ))
             
@@ -180,16 +191,21 @@ def merge_duplicate_movies():
         if delete_ids:
             print(f"🗑️  Deleting {len(delete_ids)} duplicate entries...")
             
-            # Delete from category links first
-            cursor.execute(f"""
-                DELETE FROM movie_category_links
-                WHERE movie_id IN ({','.join(map(str, delete_ids))})
-            """)
+            delete_list = ','.join(map(str, delete_ids))
             
-            # Delete movies
+            # Delete from category links if table exists
+            try:
+                cursor.execute(f"""
+                    DELETE FROM movie_category_links
+                    WHERE movie_id IN ({delete_list})
+                """)
+            except mysql.connector.Error:
+                pass  # Table may not exist yet
+            
+            # Delete duplicate movies
             cursor.execute(f"""
                 DELETE FROM mlsbd_movies
-                WHERE id IN ({','.join(map(str, delete_ids))})
+                WHERE id IN ({delete_list})
             """)
         
         conn.commit()
