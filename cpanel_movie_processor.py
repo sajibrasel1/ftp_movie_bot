@@ -57,7 +57,7 @@ TELEGRAM_SESSION = os.environ.get("TELEGRAM_SESSION", (
 ))
 TELEGRAM_BOT_TOKEN = "8294665841:AAGA0fldnAJj0dazXQsa9p67HARnqACwW0E"
 TELEGRAM_CHANNEL = "https://t.me/newmoviesarena4u"
-TELEGRAM_CHAT_ID = "@newmoviesarena4u"  # Channel username
+TELEGRAM_CHAT_ID = "@newmoviesarena4u"
 
 # Movie website URL
 MOVIE_SITE_URL = "https://movies.techandclick.site"
@@ -365,15 +365,15 @@ async def process_movies():
         
         logger.info(f"📋 Found {len(movies)} pending movies")
         
-        # Initialize Telegram client
+        # Initialize Telegram client - use bot token for posting
         client = TelegramClient(
             StringSession(TELEGRAM_SESSION) if TELEGRAM_SESSION else "cpanel_processor",
             TELEGRAM_API_ID,
             TELEGRAM_API_HASH
         )
         
-        await client.start()
-        logger.info("✅ Connected to Telegram")
+        await client.start(bot_token=TELEGRAM_BOT_TOKEN)
+        logger.info("✅ Connected to Telegram as Bot")
         
         # Process each movie
         success_count = 0
