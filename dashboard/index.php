@@ -75,6 +75,16 @@ try {
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" href="ads_manager.php">
+                            <i class="bi bi-megaphone"></i> Ads
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="direct_link_manager.php">
+                            <i class="bi bi-link-45deg"></i> Direct Links
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="logout.php">
                             <i class="bi bi-box-arrow-right"></i> Logout
                         </a>

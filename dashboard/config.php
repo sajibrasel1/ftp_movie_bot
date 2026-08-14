@@ -7,10 +7,13 @@
 // Password protection
 define('DASHBOARD_PASSWORD', '12345Sajibs6@');
 
+// Auto-detect environment
+$isLocal = file_exists('C:/xampp') || file_exists('/Applications/XAMPP');
+
 // Database configuration
 define('DB_HOST', 'localhost');
-define('DB_USER', 'techandc_bot');
-define('DB_PASS', '12345Sajibs6@');
+define('DB_USER', $isLocal ? 'root' : 'techandc_bot');
+define('DB_PASS', $isLocal ? '' : '12345Sajibs6@');
 define('DB_NAME', 'techandc_prompts');
 define('DB_TABLE', 'mlsbd_movies');
 

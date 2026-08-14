@@ -28,6 +28,9 @@ import mysql.connector
 import requests
 from bs4 import BeautifulSoup
 
+# Import slug generator
+from slug_generator import generate_slug, ensure_unique_slug
+
 # =====================================================
 # CONFIGURATION
 # =====================================================
@@ -157,15 +160,20 @@ def insert_movie(cursor, movie_data):
         # Convert download_links dict to JSON string
         download_links_json = json.dumps(movie_data.get("download_links", {})) if movie_data.get("download_links") else None
         
+        # Generate SEO-friendly slug
+        slug = generate_slug(movie_data["title"])
+        slug = ensure_unique_slug(cursor, slug)
+        
         cursor.execute(
             """
             INSERT INTO mlsbd_movies 
-                (movie_title, mlsbd_url, savelinks_url, gdflix_url, download_links, poster_url,
+                (movie_title, slug, mlsbd_url, savelinks_url, gdflix_url, download_links, poster_url,
                  quality, year, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
             """,
             (
                 movie_data["title"],
+                slug,
                 movie_data["mlsbd_url"],
                 movie_data["savelinks_url"],
                 movie_data.get("gdflix_url"),  # May be None if GDFlix not found
