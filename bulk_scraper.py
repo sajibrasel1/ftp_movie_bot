@@ -549,7 +549,7 @@ def main():
 
     logger.info("=" * 70)
     logger.info("🎬 MLSBD BULK SCRAPER STARTING")
-    logger.info(f"   Pages: {args.start} to {args.start + args.pages - 1}")
+    logger.info(f"   Pages: {args.start + args.pages - 1} down to {args.start} (newest first)")
     logger.info(f"   Dry run: {args.dry_run}")
     logger.info(f"   Domain: {MLSBD_BASE_URL}")
     logger.info("=" * 70)
@@ -561,7 +561,10 @@ def main():
     total_posts = 0
     empty_pages = 0
 
-    for page_num in range(args.start, args.start + args.pages):
+    # Reverse: start from highest page down to 1 (oldest→newest in DB, newest on site)
+    page_range = list(range(args.start + args.pages - 1, args.start - 1, -1))
+
+    for page_num in page_range:
         logger.info(f"\n📄 Scraping page {page_num}...")
         posts = get_post_links_from_page(page_num)
 
