@@ -141,6 +141,9 @@ def assign_categories(cursor, movie_id, title, quality=''):
                     )
             except Exception:
                 pass
+
+
+def insert_movie(cursor, data, dry_run=False):
     """
     Smart insert: if same base_movie_title exists, merge the new quality into it.
     Otherwise insert a new row. Never creates duplicate movies.
