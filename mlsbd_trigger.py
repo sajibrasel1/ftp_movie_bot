@@ -154,39 +154,106 @@ def check_movie_exists(cursor, gdflix_url):
         logger.error(f"Error checking movie existence: {e}")
         return None
 
+def get_base_title(title):
+    """Extract clean base title removing quality indicators"""
+    import re
+    t = re.sub(r'\s*\[?(4K Ultra HD|4K|2160p|1080p Full HD|1080p|Full HD|720p HD|720p|480p|SD)\]?\s*', ' ', title, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', t).strip().strip('[]').strip()
+
+def get_existing_by_base_title(cursor, base_title):
+    """Get existing movie row by base title (for merging qualities)"""
+    cursor.execute(
+        "SELECT id, quality, available_qualities, quality_variants "
+        "FROM mlsbd_movies WHERE base_movie_title = %s LIMIT 1",
+        (base_title,)
+    )
+    return cursor.fetchone()
+
 def insert_movie(cursor, movie_data):
-    """Insert new movie into database"""
+    """
+    Smart upsert: merge quality into existing movie if same base title exists.
+    Never creates duplicate rows for the same movie.
+    """
     try:
-        # Convert download_links dict to JSON string
-        download_links_json = json.dumps(movie_data.get("download_links", {})) if movie_data.get("download_links") else None
-        
-        # Generate SEO-friendly slug
-        slug = generate_slug(movie_data["title"])
-        slug = ensure_unique_slug(cursor, slug)
-        
-        cursor.execute(
-            """
-            INSERT INTO mlsbd_movies 
-                (movie_title, slug, mlsbd_url, savelinks_url, gdflix_url, download_links, poster_url,
-                 quality, year, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
-            """,
-            (
-                movie_data["title"],
-                slug,
-                movie_data["mlsbd_url"],
-                movie_data["savelinks_url"],
-                movie_data.get("gdflix_url"),  # May be None if GDFlix not found
-                download_links_json,
-                movie_data.get("poster_url"),
-                movie_data["quality"],
-                movie_data["year"],
+        base_title = get_base_title(movie_data["title"])
+        quality    = movie_data["quality"]
+        dl         = movie_data.get("download_links", {}) or {}
+        dl_json    = json.dumps(dl) if dl else None
+
+        existing = get_existing_by_base_title(cursor, base_title)
+
+        if existing:
+            # ── MERGE quality into existing row ──
+            movie_id = existing['id']
+            try:
+                avail = json.loads(existing['available_qualities'] or '[]')
+            except Exception:
+                avail = []
+            if quality not in avail:
+                avail.append(quality)
+
+            try:
+                qv = json.loads(existing['quality_variants'] or '{}')
+            except Exception:
+                qv = {}
+            qv[quality] = {
+                'size': 'Unknown',
+                'download_links': dl,
+                'mlsbd_url': movie_data.get('mlsbd_url', ''),
+                'savelinks_url': movie_data.get('savelinks_url', ''),
+            }
+
+            QP = {'4K Ultra HD': 4, '1080p Full HD': 3, '720p HD': 2, '480p': 1}
+            best_quality = max(avail, key=lambda q: QP.get(q, 0))
+
+            cursor.execute("""
+                UPDATE mlsbd_movies
+                SET available_qualities = %s,
+                    quality_variants    = %s,
+                    quality             = %s,
+                    updated_at          = NOW()
+                WHERE id = %s
+            """, (json.dumps(avail), json.dumps(qv), best_quality, movie_id))
+            logger.debug(f"Merged quality [{quality}] into: {base_title}")
+            return movie_id
+
+        else:
+            # ── INSERT new movie ──
+            slug = generate_slug(base_title)
+            slug = ensure_unique_slug(cursor, slug)
+
+            qv = {quality: {'size': 'Unknown', 'download_links': dl,
+                            'mlsbd_url': movie_data.get('mlsbd_url', ''),
+                            'savelinks_url': movie_data.get('savelinks_url', '')}}
+
+            cursor.execute(
+                """
+                INSERT INTO mlsbd_movies
+                    (movie_title, slug, mlsbd_url, savelinks_url, gdflix_url,
+                     download_links, poster_url, quality, year, status,
+                     available_qualities, quality_variants, base_movie_title)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+                """,
+                (
+                    base_title,
+                    slug,
+                    movie_data["mlsbd_url"],
+                    movie_data["savelinks_url"],
+                    movie_data.get("gdflix_url"),
+                    dl_json,
+                    movie_data.get("poster_url"),
+                    quality,
+                    movie_data["year"],
+                    json.dumps([quality]),
+                    json.dumps(qv),
+                    base_title,
+                )
             )
-        )
-        return cursor.lastrowid
+            return cursor.lastrowid
+
     except mysql.connector.Error as e:
-        if e.errno == 1062:  # Duplicate entry
-            logger.debug(f"Movie already exists: {movie_data['title']}")
+        if e.errno == 1062:
+            logger.debug(f"Duplicate slug, skipping: {movie_data['title']}")
             return None
         logger.error(f"Error inserting movie: {e}")
         return None
