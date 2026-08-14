@@ -255,19 +255,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-Flow:
-1. Get pending movies from database
-2. Download poster image
-3. Auto-detect and assign categories
-4. Post to Telegram with website link
-5. Mark as completed
-
-Author: AI Assistant
-Version: 2.1 (With Auto Categories)
-"""
-
-import asyncio
-import json
 import logging
 import os
 import sys
