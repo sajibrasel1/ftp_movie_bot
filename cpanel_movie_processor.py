@@ -101,12 +101,14 @@ def get_pending_movies(cursor, limit=5):
     """Get pending movies ready for Telegram posting"""
     cursor.execute(
         """
-        SELECT id, movie_title, slug, poster_url, quality, 
-               movie_size_readable, year, download_links, mlsbd_url
+        SELECT id, movie_title, slug, poster_url, quality,
+               movie_size_readable, year, download_links, mlsbd_url,
+               available_qualities
         FROM mlsbd_movies 
         WHERE status = 'pending'
         AND poster_url IS NOT NULL
         AND slug IS NOT NULL
+        AND (telegram_message_ids IS NULL OR telegram_message_ids = '')
         ORDER BY created_at ASC
         LIMIT %s
         """,
@@ -124,12 +126,11 @@ def mark_movie_as_processing(cursor, movie_id):
 
 
 def mark_movie_as_completed(cursor, movie_id, telegram_message_id):
-    """Mark movie as completed"""
+    """Mark movie as posted to Telegram (keep pending status, just record message id)"""
     cursor.execute(
         """
         UPDATE mlsbd_movies 
-        SET status = 'completed',
-            telegram_message_ids = %s,
+        SET telegram_message_ids = %s,
             telegram_channel_id = %s,
             processing_completed_at = NOW()
         WHERE id = %s
@@ -276,35 +277,47 @@ def download_poster(poster_url, movie_id):
 # =====================================================
 
 async def post_movie_to_telegram(client, movie, poster_path):
-    """
-    Post movie to Telegram with poster and website link
-    
-    Returns:
-        int: Message ID if successful, None otherwise
-    """
+    """Post movie to Telegram with poster and website link"""
     try:
-        movie_id, movie_title, slug, poster_url, quality, size, year, download_links, mlsbd_url = movie
-        
-        # Build movie URL
-        movie_url = f"{MOVIE_SITE_URL}/{slug}"
-        
+        movie_id, movie_title, slug, poster_url, quality, size, year, download_links, mlsbd_url, available_qualities = movie
+
+        # Build movie page URL
+        movie_url = f"{MOVIE_SITE_URL}/movie.php?slug={slug}"
+
+        # Parse available qualities
+        qualities_str = ''
+        if available_qualities:
+            try:
+                qs = json.loads(available_qualities)
+                if isinstance(qs, list) and qs:
+                    qualities_str = ' | '.join(qs)
+            except Exception:
+                pass
+        if not qualities_str and quality:
+            qualities_str = quality
+
         # Build caption
-        caption = f"🎬 **{movie_title}**\n\n"
-        
-        if quality:
-            caption += f"📺 Quality: **{quality}**\n"
+        caption_lines = [
+            f"🎬 **{movie_title}**",
+            "",
+        ]
         if year:
-            caption += f"📅 Year: **{year}**\n"
+            caption_lines.append(f"📅 {year}")
+        if qualities_str:
+            caption_lines.append(f"🎞 {qualities_str}")
         if size:
-            caption += f"💾 Size: **{size}**\n"
-        
-        caption += f"\n🔗 Watch & Download:\n"
-        caption += f"Click the button below 👇"
-        
-        # Create inline button
-        buttons = [[Button.url("🎬 Watch Now", movie_url)]]
-        
-        # Post with poster
+            caption_lines.append(f"💾 {size}")
+
+        caption_lines += [
+            "",
+            "👇 Watch & Download",
+        ]
+        caption = '\n'.join(caption_lines)
+
+        # Inline button
+        buttons = [[Button.url("🎬 Watch Now & Download", movie_url)]]
+
+        # Send with poster or text-only
         if poster_path and poster_path.exists():
             message = await client.send_file(
                 TELEGRAM_CHAT_ID,
@@ -314,20 +327,16 @@ async def post_movie_to_telegram(client, movie, poster_path):
                 parse_mode='md'
             )
         else:
-            # Post without poster (text only)
             message = await client.send_message(
                 TELEGRAM_CHAT_ID,
                 caption,
                 buttons=buttons,
                 parse_mode='md'
             )
-        
-        logger.info(f"✅ Posted to Telegram: {movie_title}")
-        logger.info(f"   Message ID: {message.id}")
-        logger.info(f"   URL: {movie_url}")
-        
+
+        logger.info(f"✅ Posted to Telegram: {movie_title} (msg_id={message.id})")
         return message.id
-        
+
     except Exception as e:
         logger.error(f"❌ Failed to post to Telegram: {e}")
         return None
