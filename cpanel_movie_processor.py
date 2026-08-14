@@ -2,8 +2,258 @@
 """
 cPanel Direct Movie Processor
 =============================
-Processes pending movies and posts directly to Telegram
-NO GitHub Actions - Everything runs on cPanel
+Posts pending movies to Telegram channel using Bot API (no Telethon session needed)
+Bot (@GetLatestMoviesBot) must be admin of @newmoviesarena4u
+"""
+
+import asyncio
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+import mysql.connector
+import requests
+
+# =====================================================
+# CONFIGURATION
+# =====================================================
+
+DB_CONFIG = {
+    "host": "localhost",
+    "user": "techandc_bot",
+    "password": "12345Sajibs6@",
+    "database": "techandc_prompts",
+}
+
+TELEGRAM_BOT_TOKEN = "8294665841:AAGA0fldnAJj0dazXQsa9p67HARnqACwW0E"
+TELEGRAM_CHAT_ID   = "@newmoviesarena4u"
+MOVIE_SITE_URL     = "https://movies.techandclick.site"
+
+BASE_DIR  = Path(__file__).resolve().parent
+LOG_DIR   = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+TEMP_DIR  = BASE_DIR / "temp_posters"
+TEMP_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_DIR / "cpanel_movie_processor.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+BOT_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# =====================================================
+# DATABASE
+# =====================================================
+
+def get_db():
+    conn = mysql.connector.connect(**DB_CONFIG)
+    conn.autocommit = False
+    return conn
+
+def get_pending_movies(cursor, limit=5):
+    cursor.execute("""
+        SELECT id, movie_title, slug, poster_url, quality,
+               movie_size_readable, year, available_qualities
+        FROM mlsbd_movies
+        WHERE status = 'pending'
+        AND poster_url IS NOT NULL
+        AND slug IS NOT NULL
+        AND (telegram_message_ids IS NULL OR telegram_message_ids = '')
+        ORDER BY created_at ASC
+        LIMIT %s
+    """, (limit,))
+    return cursor.fetchall()
+
+def mark_as_posted(cursor, movie_id, message_id):
+    cursor.execute("""
+        UPDATE mlsbd_movies
+        SET telegram_message_ids = %s,
+            telegram_channel_id  = %s,
+            processing_completed_at = NOW()
+        WHERE id = %s
+    """, (json.dumps([message_id]), TELEGRAM_CHAT_ID, movie_id))
+
+def assign_categories(cursor, movie_id, title, quality=''):
+    import re as _re
+    t = f"{title} {quality}".lower()
+    slug_map = {
+        'bengali-movies':  _re.search(r'\b(bengali|bangla|hoichoi|chorki|bongodb|iscreen|fridaay|klikk|utshob|cinematic|bongo)\b', t),
+        'hindi-movies':    _re.search(r'\b(hindi|bollywood)\b', t),
+        'english-movies':  _re.search(r'\b(english|hollywood)\b', t),
+        'tamil-movies':    _re.search(r'\b(tamil|kollywood)\b', t),
+        'telugu-movies':   _re.search(r'\b(telugu|tollywood)\b', t),
+        'dual-audio':      _re.search(r'\bdual\s*audio\b', t),
+        'web-series':      _re.search(r'\b(s\d{2}e\d{2}|season\s*\d+|web\s*series|netflix|amazon|hoichoi|hotstar|zee5|sonyliv)\b', t),
+        '4k-ultra-hd':     _re.search(r'\b(4k|2160p)\b', t),
+        '1080p-full-hd':   _re.search(r'\b1080p?\b', t),
+        '720p-hd':         _re.search(r'\b720p?\b', t),
+        '480p':            _re.search(r'\b480p?\b', t),
+    }
+    for slug, match in slug_map.items():
+        if match:
+            try:
+                cursor.execute("SELECT id FROM movie_categories WHERE category_slug=%s LIMIT 1", (slug,))
+                row = cursor.fetchone()
+                if row:
+                    cat_id = row[0] if isinstance(row, tuple) else row['id']
+                    cursor.execute(
+                        "INSERT IGNORE INTO movie_category_links (movie_id, category_id) VALUES (%s,%s)",
+                        (movie_id, cat_id)
+                    )
+            except Exception:
+                pass
+
+# =====================================================
+# TELEGRAM BOT API
+# =====================================================
+
+def download_poster(url, movie_id):
+    try:
+        r = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
+        r.raise_for_status()
+        ext = '.jpg'
+        ct = r.headers.get('Content-Type', '')
+        if 'png' in ct: ext = '.png'
+        elif 'webp' in ct: ext = '.webp'
+        path = TEMP_DIR / f"poster_{movie_id}{ext}"
+        path.write_bytes(r.content)
+        return path
+    except Exception as e:
+        logger.warning(f"Poster download failed: {e}")
+        return None
+
+def send_to_telegram(movie, poster_path):
+    """Send movie to Telegram channel via Bot API"""
+    mid, title, slug, poster_url, quality, size, year, available_qualities = movie
+
+    movie_url = f"{MOVIE_SITE_URL}/movie.php?slug={slug}"
+
+    # Build qualities string
+    qualities_str = ''
+    if available_qualities:
+        try:
+            qs = json.loads(available_qualities)
+            if isinstance(qs, list): qualities_str = ' | '.join(qs)
+        except Exception:
+            pass
+    if not qualities_str and quality:
+        qualities_str = quality
+
+    # Caption
+    lines = [f"🎬 <b>{title}</b>", ""]
+    if year:            lines.append(f"📅 {year}")
+    if qualities_str:   lines.append(f"🎞 {qualities_str}")
+    if size:            lines.append(f"💾 {size}")
+    lines += ["", "👇 Watch &amp; Download"]
+    caption = '\n'.join(lines)
+
+    # Inline keyboard
+    keyboard = json.dumps({
+        "inline_keyboard": [[
+            {"text": "🎬 Watch Now & Download", "url": movie_url}
+        ]]
+    })
+
+    # Send photo with caption
+    if poster_path and poster_path.exists():
+        with open(poster_path, 'rb') as f:
+            resp = requests.post(
+                f"{BOT_API}/sendPhoto",
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "reply_markup": keyboard,
+                },
+                files={"photo": f},
+                timeout=60
+            )
+    else:
+        resp = requests.post(
+            f"{BOT_API}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": caption,
+                "parse_mode": "HTML",
+                "reply_markup": json.loads(keyboard),
+                "disable_web_page_preview": False,
+            },
+            timeout=30
+        )
+
+    data = resp.json()
+    if data.get('ok'):
+        return data['result']['message_id']
+    else:
+        raise Exception(data.get('description', 'Unknown error'))
+
+# =====================================================
+# MAIN
+# =====================================================
+
+def main():
+    logger.info("=" * 70)
+    logger.info("🎬 MOVIE PROCESSOR STARTED (Bot API)")
+    logger.info("=" * 70)
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    movies = get_pending_movies(cursor, limit=10)
+    if not movies:
+        logger.info("✅ No pending movies.")
+        conn.close()
+        return
+
+    logger.info(f"📋 Found {len(movies)} pending movies")
+    success = failed = 0
+
+    for movie in movies:
+        movie_id, title = movie[0], movie[1]
+        poster_url = movie[3]
+        quality    = movie[4] or ''
+
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Processing: {title} (id={movie_id})")
+
+        try:
+            assign_categories(cursor, movie_id, title, quality)
+            conn.commit()
+
+            poster_path = download_poster(poster_url, movie_id) if poster_url else None
+
+            message_id = send_to_telegram(movie, poster_path)
+            mark_as_posted(cursor, movie_id, message_id)
+            conn.commit()
+
+            if poster_path and poster_path.exists():
+                poster_path.unlink()
+
+            logger.info(f"✅ Posted! message_id={message_id}")
+            success += 1
+            import time; time.sleep(2)  # avoid flood
+
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"❌ Failed: {e}")
+            failed += 1
+
+    logger.info(f"\n{'='*70}")
+    logger.info(f"✅ Success: {success}  ❌ Failed: {failed}")
+    logger.info("=" * 70)
+    cursor.close()
+    conn.close()
+
+if __name__ == "__main__":
+    main()
 
 Flow:
 1. Get pending movies from database
