@@ -2,231 +2,168 @@
 """
 Movie Quality Merger
 ====================
-Merges duplicate movies with different qualities into single entries
-
-Example:
-- "Malik (2026) [720p HD]"
-- "Malik (2026) [1080p Full HD]"
-- "Malik (2026) [480p SD]"
-
-Becomes:
-- "Malik (2026)" with 3 quality options
-
-Author: AI Assistant
+Merges duplicate movies with different qualities into single entries.
+Always deletes duplicates BEFORE updating primary to avoid unique constraint errors.
 """
 
 import json
 import re
-import sys
 from collections import defaultdict
-
 import mysql.connector
 
-# Database configuration
 DB_CONFIG = {
     'host': 'localhost',
     'user': 'techandc_bot',
     'password': '12345Sajibs6@',
     'database': 'techandc_prompts',
     'charset': 'utf8mb4',
-    'collation': 'utf8mb4_unicode_ci'
 }
 
+QP = {'4K Ultra HD': 4, '1080p Full HD': 3, '720p HD': 2, '480p': 1}
 
-def extract_base_title_and_quality(title):
-    """
-    Extract base movie title and quality from full title
-    
-    Args:
-        title: Full movie title
-        
-    Returns:
-        tuple: (base_title, quality)
-    """
-    # Remove quality indicators
-    quality_patterns = [
-        (r'\s*\[?(480p?|SD)\]?\s*', '480p'),
-        (r'\s*\[?(720p?|HD)\]?\s*', '720p'),
-        (r'\s*\[?(1080p?|Full\s*HD|FHD)\]?\s*', '1080p'),
-        (r'\s*\[?(4K|2160p?|Ultra\s*HD|UHD)\]?\s*', '4K'),
-    ]
-    
-    detected_quality = None
-    base_title = title
-    
-    for pattern, quality in quality_patterns:
+
+def extract_quality(title):
+    for pattern, quality in [
+        (r'4K Ultra HD|4K|2160p', '4K Ultra HD'),
+        (r'1080p Full HD|1080p|Full HD', '1080p Full HD'),
+        (r'720p HD|720p', '720p HD'),
+        (r'480p|SD', '480p'),
+    ]:
         if re.search(pattern, title, re.IGNORECASE):
-            detected_quality = quality
-            base_title = re.sub(pattern, ' ', title, flags=re.IGNORECASE)
-            break
-    
-    # Clean up extra spaces and brackets
-    base_title = re.sub(r'\s+', ' ', base_title).strip()
-    base_title = re.sub(r'\s*\[\s*\]\s*', '', base_title)
-    
-    return base_title, detected_quality
+            return quality
+    return None
+
+
+def clean_base_title(title):
+    t = re.sub(
+        r'\s*\[?(4K Ultra HD|4K|2160p|1080p Full HD|1080p|Full HD|720p HD|720p|480p|SD)\]?\s*',
+        ' ', title, flags=re.IGNORECASE
+    )
+    return re.sub(r'\s+', ' ', t).strip().strip('[]').strip()
 
 
 def merge_duplicate_movies():
-    """Merge movies with same base title but different qualities"""
-    
-    print("🎬 Starting Movie Quality Merger...\n")
-    print("=" * 70)
-    
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor(dictionary=True)
-        
-        # Get all movies (all statuses)
-        cursor.execute("""
-            SELECT id, movie_title, slug, quality, movie_size_readable, 
-                   download_links, poster_url, mlsbd_url, year,
-                   created_at, status, base_movie_title
-            FROM mlsbd_movies
-            ORDER BY movie_title, quality
-        """)
-        
-        all_movies = cursor.fetchall()
-        print(f"📊 Found {len(all_movies)} movies to process\n")
-        
-        # Group movies by base title
-        # Priority: use base_movie_title column if available, else extract from movie_title
-        movie_groups = defaultdict(list)
-        
-        for movie in all_movies:
-            # Use base_movie_title column if available and set
-            base_from_db = movie.get('base_movie_title')
-            if base_from_db and base_from_db.strip():
-                base_title = base_from_db.strip()
-            else:
-                base_title, _ = extract_base_title_and_quality(movie['movie_title'])
-            
-            # Also strip quality from base_title if it slipped through
-            base_title, _ = extract_base_title_and_quality(base_title)
-            
-            # Use detected quality if available, else use database quality
-            _, detected_quality = extract_base_title_and_quality(movie['movie_title'])
-            final_quality = detected_quality or movie['quality']
-            
-            movie_groups[base_title].append({
-                **movie,
-                'base_title': base_title,
-                'detected_quality': final_quality
-            })
-        
-        print(f"📦 Grouped into {len(movie_groups)} unique movies\n")
-        
-        # Process groups with multiple qualities
-        merged_count = 0
-        kept_ids = set()
-        delete_ids = set()
-        
-        for base_title, variants in movie_groups.items():
-            if len(variants) <= 1:
-                # Single quality - keep as is
-                kept_ids.add(variants[0]['id'])
-                continue
-            
-            print(f"🔀 Merging: {base_title}")
-            print(f"   Found {len(variants)} quality variants:")
-            
-            # Sort by quality priority (highest first)
-            quality_priority = {'4K': 4, '1080p': 3, '720p': 2, '480p': 1}
-            variants.sort(key=lambda x: quality_priority.get(x['detected_quality'], 0), reverse=True)
-            
-            # Use highest quality as primary
-            primary = variants[0]
-            kept_ids.add(primary['id'])
-            
-            # Build quality_variants JSON
-            quality_variants = {}
-            available_qualities = []
-            
-            for variant in variants:
-                quality = variant['detected_quality'] or 'Unknown'
-                available_qualities.append(quality)
-                
-                # Parse download links
-                download_links = {}
-                if variant['download_links']:
-                    try:
-                        download_links = json.loads(variant['download_links'])
-                    except:
-                        pass
-                
-                quality_variants[quality] = {
-                    'size': variant['movie_size_readable'] or 'Unknown',
-                    'download_links': download_links,
-                    'mlsbd_url': variant['mlsbd_url']
-                }
-                
-                print(f"      • {quality}: {variant['movie_size_readable']}")
-                
-                # Mark others for deletion
-                if variant['id'] != primary['id']:
-                    delete_ids.add(variant['id'])
-            
-            # Update primary movie with merged data
+    print("🎬 Starting Movie Quality Merger...\n" + "=" * 70)
+
+    conn = mysql.connector.connect(**DB_CONFIG)
+    conn.autocommit = False
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT id, movie_title, slug, quality, movie_size_readable,
+               download_links, poster_url, mlsbd_url, year, base_movie_title
+        FROM mlsbd_movies ORDER BY id ASC
+    """)
+    all_movies = cursor.fetchall()
+    print(f"📊 Found {len(all_movies)} movies to process\n")
+
+    # Group by base title
+    groups = defaultdict(list)
+    for m in all_movies:
+        base = (m.get('base_movie_title') or '').strip()
+        if not base:
+            base = clean_base_title(m['movie_title'])
+        base = clean_base_title(base)
+        detected_q = extract_quality(m['movie_title']) or m.get('quality') or '720p HD'
+        groups[base].append({**m, '_base': base, '_q': detected_q})
+
+    print(f"📦 Grouped into {len(groups)} unique movies\n")
+
+    merged_count = 0
+    deleted_count = 0
+    skipped_count = 0
+
+    for base_title, variants in groups.items():
+        # Single entry — just ensure base_movie_title is set
+        if len(variants) == 1:
+            m = variants[0]
+            if not (m.get('base_movie_title') or '').strip():
+                try:
+                    cursor.execute(
+                        "UPDATE mlsbd_movies SET base_movie_title=%s WHERE id=%s",
+                        (base_title, m['id'])
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+            continue
+
+        # Sort: highest quality first
+        variants.sort(key=lambda x: QP.get(x['_q'], 0), reverse=True)
+        primary = variants[0]
+
+        # Build merged data
+        available_qualities = []
+        quality_variants = {}
+        for v in variants:
+            q = v['_q']
+            available_qualities.append(q)
+            dl = {}
+            if v.get('download_links'):
+                try:
+                    dl = json.loads(v['download_links'])
+                except Exception:
+                    pass
+            quality_variants[q] = {
+                'size': v.get('movie_size_readable') or 'Unknown',
+                'download_links': dl,
+                'mlsbd_url': v.get('mlsbd_url', ''),
+            }
+
+        dup_ids = [v['id'] for v in variants if v['id'] != primary['id']]
+
+        try:
+            # ── 1. DELETE duplicates first (avoids unique constraint on UPDATE) ──
+            if dup_ids:
+                id_list = ','.join(map(str, dup_ids))
+                try:
+                    cursor.execute(
+                        f"DELETE FROM movie_category_links WHERE movie_id IN ({id_list})"
+                    )
+                except Exception:
+                    pass
+                cursor.execute(
+                    f"DELETE FROM mlsbd_movies WHERE id IN ({id_list})"
+                )
+                deleted_count += len(dup_ids)
+
+            # ── 2. UPDATE primary with merged data ──
+            best_quality = max(available_qualities, key=lambda q: QP.get(q, 0))
             cursor.execute("""
                 UPDATE mlsbd_movies
-                SET base_movie_title = %s,
+                SET base_movie_title    = %s,
+                    movie_title         = %s,
+                    quality             = %s,
                     available_qualities = %s,
-                    quality_variants = %s,
-                    movie_title = %s,
-                    quality = %s
+                    quality_variants    = %s
                 WHERE id = %s
             """, (
                 base_title,
+                base_title,
+                best_quality,
                 json.dumps(available_qualities),
                 json.dumps(quality_variants),
-                base_title,  # Clean title without quality
-                available_qualities[0] if available_qualities else primary['quality'],  # best quality
-                primary['id']
+                primary['id'],
             ))
-            
+
+            conn.commit()
             merged_count += 1
-            print(f"   ✅ Merged into movie ID: {primary['id']}\n")
-        
-        # Delete duplicate entries
-        if delete_ids:
-            print(f"🗑️  Deleting {len(delete_ids)} duplicate entries...")
-            
-            delete_list = ','.join(map(str, delete_ids))
-            
-            # Delete from category links if table exists
-            try:
-                cursor.execute(f"""
-                    DELETE FROM movie_category_links
-                    WHERE movie_id IN ({delete_list})
-                """)
-            except mysql.connector.Error:
-                pass  # Table may not exist yet
-            
-            # Delete duplicate movies
-            cursor.execute(f"""
-                DELETE FROM mlsbd_movies
-                WHERE id IN ({delete_list})
-            """)
-        
-        conn.commit()
-        
-        print("\n" + "=" * 70)
-        print(f"✅ Merge completed!")
-        print(f"   Unique movies: {len(movie_groups)}")
-        print(f"   Multi-quality movies: {merged_count}")
-        print(f"   Deleted duplicates: {len(delete_ids)}")
-        print("=" * 70)
-        
-        cursor.close()
-        conn.close()
-        
-        return True
-        
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+            print(f"  ✅ Merged: {base_title[:60]} ({len(variants)} → 1)")
+
+        except mysql.connector.Error as e:
+            conn.rollback()
+            skipped_count += 1
+            print(f"  ⚠️  Skipped: {base_title[:60]} — {e}")
+
+    print(f"\n{'=' * 70}")
+    print(f"✅ Done!")
+    print(f"   Merged : {merged_count} groups")
+    print(f"   Deleted: {deleted_count} duplicates")
+    print(f"   Skipped: {skipped_count}")
+    print("=" * 70)
+
+    cursor.close()
+    conn.close()
 
 
 if __name__ == '__main__':
