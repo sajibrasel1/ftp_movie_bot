@@ -50,10 +50,13 @@ def get_db_connection():
         return None
 
 def get_base_title(title):
-    """Extract clean base title removing quality indicators"""
+    """Extract clean base title removing quality indicators and pipes"""
     t = re.sub(r'\s*\[?(4K Ultra HD|4K|2160p|1080p Full HD|1080p|Full HD|720p HD|720p|480p|SD)\]?\s*', ' ', title, flags=re.IGNORECASE)
     t = re.sub(r'Download & Watch Online.*', '', t, flags=re.IGNORECASE)
-    return re.sub(r'\s+', ' ', t).strip().strip('[]').strip()
+    # Remove pipes and extra spaces
+    t = re.sub(r'\|+', ' ', t)
+    t = re.sub(r'\s+', ' ', t)
+    return t.strip().strip('[]').strip()
 
 def get_existing_by_base_title(cursor, base_title):
     """Get existing movie row by base title (for merging qualities)"""
