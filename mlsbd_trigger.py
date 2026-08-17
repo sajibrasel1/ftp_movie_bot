@@ -490,84 +490,107 @@ def extract_poster_from_page(soup, post_url):
         logger.error(f"  ❌ Error extracting poster: {e}")
         return None
 
-def crawl_mlsbd():
+def crawl_mlsbd(max_pages=3):
     """
-    Crawls MLSBD homepage, extracts new movie posts, 
+    Crawls MLSBD homepage (page 1-3), extracts new movie posts, 
     and resolves Savelinks -> GDFlix URLs.
     Automatically detects and updates domain if current one fails.
+    
+    Args:
+        max_pages: Number of homepage pages to scrape (default: 3)
     """
     global MLSBD_BASE_URL  # Declare at the top of function
     
-    logger.info("🎬 Starting MLSBD Crawl...")
+    logger.info(f"🎬 Starting MLSBD Crawl (scraping pages 1-{max_pages})...")
     movies_found = []
+    all_post_links = []
+    
+    # Connect to DB early for duplicate checking
+    db_conn = get_db_connection()
+    if not db_conn:
+        return []
+    cursor = db_conn.cursor()
     
     try:
-        # Try to access MLSBD with current domain
-        r = requests.get(MLSBD_BASE_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        
-        # Check if request failed
-        if r.status_code != 200:
-            logger.warning(f"⚠️ Current domain {MLSBD_BASE_URL} returned status {r.status_code}")
-            logger.info("🔍 Attempting auto-detection of new MLSBD domain...")
+        # Scrape multiple pages
+        for page_num in range(1, max_pages + 1):
+            if page_num == 1:
+                page_url = MLSBD_BASE_URL
+            else:
+                page_url = f"{MLSBD_BASE_URL}/page/{page_num}/"
             
-            # Import and run auto-detection
-            try:
-                from auto_detect_mlsbd_domain import auto_detect_and_update
-                new_domain = auto_detect_and_update()
+            logger.info(f"📄 Scraping page {page_num}: {page_url}")
+            
+            # Try to access MLSBD page
+            r = requests.get(page_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            
+            # Check if request failed
+            if r.status_code != 200:
+                logger.warning(f"⚠️ Page {page_num} returned status {r.status_code}")
                 
-                if new_domain:
-                    MLSBD_BASE_URL = new_domain
-                    logger.info(f"✅ Switched to new domain: {MLSBD_BASE_URL}")
+                # Only try domain detection on first page failure
+                if page_num == 1:
+                    logger.info("🔍 Attempting auto-detection of new MLSBD domain...")
                     
-                    # Retry with new domain
-                    r = requests.get(MLSBD_BASE_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-                    if r.status_code != 200:
-                        logger.error(f"❌ New domain also failed: {r.status_code}")
+                    try:
+                        from auto_detect_mlsbd_domain import auto_detect_and_update
+                        new_domain = auto_detect_and_update()
+                        
+                        if new_domain:
+                            MLSBD_BASE_URL = new_domain
+                            logger.info(f"✅ Switched to new domain: {MLSBD_BASE_URL}")
+                            
+                            # Retry page 1 with new domain
+                            page_url = MLSBD_BASE_URL
+                            r = requests.get(page_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+                            if r.status_code != 200:
+                                logger.error(f"❌ New domain also failed: {r.status_code}")
+                                db_conn.close()
+                                return []
+                        else:
+                            logger.error("❌ Auto-detection failed. Cannot proceed.")
+                            db_conn.close()
+                            return []
+                    except Exception as e:
+                        logger.error(f"❌ Auto-detection error: {e}")
+                        db_conn.close()
                         return []
                 else:
-                    logger.error("❌ Auto-detection failed. Cannot proceed.")
-                    return []
-                    
-            except Exception as e:
-                logger.error(f"❌ Auto-detection error: {e}")
-                return []
+                    # Skip this page and continue
+                    continue
             
-        soup = BeautifulSoup(r.text, 'html.parser')
-        links = soup.find_all('a', href=True)
-        
-        exclude_patterns = [
-            '/category/', '/tag/', '/page/', '/contact-us/', '/about-us/', 
-            '/dmca/', '/how-to-download/', '/request/', '/login/', '/register/',
-            '/author/', 'mlsbd.co/?', 'mlsbd.co/feed', 'mlsbd.co/comments', '#'
-        ]
-        
-        seen_posts = set()
-        year_regex = re.compile(r'\((19|20)\d{2}\)')
-        post_links = []
-        
-        for link in links:
-            href = link['href']
-            title = link.text.strip()
+            soup = BeautifulSoup(r.text, 'html.parser')
+            links = soup.find_all('a', href=True)
             
-            if href.startswith("https://mlsbd.co/") and title:
-                clean_href = href.rstrip('/')
-                should_exclude = any(pat in href for pat in exclude_patterns)
+            exclude_patterns = [
+                '/category/', '/tag/', '/page/', '/contact-us/', '/about-us/', 
+                '/dmca/', '/how-to-download/', '/request/', '/login/', '/register/',
+                '/author/', 'mlsbd.co/?', 'mlsbd.co/feed', 'mlsbd.co/comments', '#'
+            ]
+            
+            seen_posts = set()
+            year_regex = re.compile(r'\((19|20)\d{2}\)')
+            
+            for link in links:
+                href = link['href']
+                title = link.text.strip()
                 
-                if not should_exclude and clean_href != "https://mlsbd.co":
-                    if year_regex.search(title):
-                        if clean_href not in seen_posts:
-                            seen_posts.add(clean_href)
-                            post_links.append((title, href))
-                            
-        logger.info(f"🔍 Found {len(post_links)} movie posts on homepage.")
+                if href.startswith("https://mlsbd.co/") and title:
+                    clean_href = href.rstrip('/')
+                    should_exclude = any(pat in href for pat in exclude_patterns)
+                    
+                    if not should_exclude and clean_href != "https://mlsbd.co":
+                        if year_regex.search(title):
+                            if clean_href not in seen_posts:
+                                seen_posts.add(clean_href)
+                                all_post_links.append((title, href))
+            
+            logger.info(f"  ✅ Found {len(seen_posts)} movie posts on page {page_num}")
+            time.sleep(1)  # Delay between pages
         
-        # Connect to DB to check duplicate links early and reduce requests
-        db_conn = get_db_connection()
-        if not db_conn:
-            return []
-        cursor = db_conn.cursor()
+        logger.info(f"🔍 Total {len(all_post_links)} unique movie posts found across {max_pages} pages.")
         
-        for raw_title, post_url in post_links[:8]:  # Scan top 8 posts to keep it fast
+        for raw_title, post_url in all_post_links[:20]:  # Process top 20 posts to keep it reasonable
             logger.info(f"📰 Scraping post: {raw_title}")
             
             try:
