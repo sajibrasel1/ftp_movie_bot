@@ -135,40 +135,7 @@ def fetch_download_links_from_page(movie_url):
     except Exception as e:
         logger.error(f"Download links fetch error: {e}")
         return {}
-    """Fetch poster URL from MLSBD movie detail page"""
-    try:
-        r = requests.get(movie_url, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
-            return None
-        
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Try multiple selectors for poster image
-        # 1. WordPress post thumbnail
-        img = soup.select_one('img.wp-post-image')
-        if img and img.get('src'):
-            return img['src']
-        
-        # 2. Featured image in article
-        img = soup.select_one('article img, .entry-content img, .post-thumbnail img')
-        if img:
-            src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-            if src and 'logo' not in src.lower():
-                return src
-        
-        # 3. Open Graph image (meta tag)
-        og_img = soup.select_one('meta[property="og:image"]')
-        if og_img and og_img.get('content'):
-            return og_img['content']
-        
-        # 4. Any img with movie-related class
-        for img in soup.select('img'):
-            classes = ' '.join(img.get('class', []))
-            if any(keyword in classes.lower() for keyword in ['poster', 'thumbnail', 'featured']):
-                src = img.get('src') or img.get('data-src')
-                if src:
-                    return src
-        
+
 def fetch_poster_from_movie_page(movie_url):
     """Fetch poster URL from MLSBD movie detail page"""
     try:
@@ -299,6 +266,7 @@ def insert_movie(cursor, movie_data):
         return None
 
 def clean_title(text):
+    """Clean movie title"""
     title = re.sub(r'Download & Watch Online.*', '', text, flags=re.IGNORECASE)
     title = re.sub(r'\d+(?:\.\d+)?\s*(?:MB|GB)', '', title, flags=re.IGNORECASE)
     title = re.sub(r'\b(480p|720p|1080p|x264|web-?dl|bluray)\b', '', title, flags=re.IGNORECASE)
@@ -306,6 +274,7 @@ def clean_title(text):
     return re.sub(r'\s+', ' ', title).strip()
 
 def parse_year(text):
+    """Extract year from title"""
     match = re.search(r'\((19|20)\d{2}\)', text)
     return int(match.group().strip('()')) if match else None
 
@@ -373,7 +342,7 @@ def main():
             existing = get_existing_by_base_title(cursor, base_title)
             
             logger.info(f"\n{'─'*50}")
-            logger.info(f"� Processing: {clean} [{quality}]")
+            logger.info(f"📰 Processing: {clean} [{quality}]")
             
             # Fetch poster
             poster_url = fetch_poster_from_movie_page(post_url)
