@@ -116,25 +116,89 @@ def resolve_savelinks(savelinks_url, referer_url):
         return {}
 
 def fetch_download_links_from_page(movie_url):
-    """Extract download links from MLSBD movie page via Savelinks"""
+    """Extract ALL quality-specific download links from MLSBD movie page"""
     try:
         r = requests.get(movie_url, headers=HEADERS, timeout=20)
         if r.status_code != 200:
-            return {}
+            return {}, {}
         
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Find Savelinks.me URLs
+        # Collect ALL savelinks URLs with their surrounding text/context
+        savelinks_urls = []
         for a in soup.find_all('a', href=True):
             href = a['href']
             if 'savelinks.me' in href:
-                logger.info(f"  🔗 Resolving Savelinks...")
-                return resolve_savelinks(href, movie_url)
+                # Get surrounding text to detect quality
+                link_text = a.get_text(strip=True)
+                # Check parent elements for quality context
+                parent_text = ''
+                parent = a.parent
+                for _ in range(3):
+                    if parent:
+                        parent_text = parent.get_text(strip=True)
+                        parent = parent.parent
+                context = f"{link_text} {parent_text}"
+                savelinks_urls.append((href, context))
         
-        return {}
+        if not savelinks_urls:
+            return {}, {}
+        
+        logger.info(f"  🔗 Found {len(savelinks_urls)} Savelinks URLs")
+        
+        # Map qualities to savelinks
+        quality_map = {
+            '4K Ultra HD': [],
+            '1080p Full HD': [],
+            '720p HD': [],
+            '480p': [],
+        }
+        unmapped = []
+        
+        for url, context in savelinks_urls:
+            ctx_upper = context.upper()
+            if '4K' in ctx_upper or '2160P' in ctx_upper:
+                quality_map['4K Ultra HD'].append(url)
+            elif '1080P' in ctx_upper:
+                quality_map['1080p Full HD'].append(url)
+            elif '720P' in ctx_upper:
+                quality_map['720p HD'].append(url)
+            elif '480P' in ctx_upper:
+                quality_map['480p'].append(url)
+            else:
+                unmapped.append(url)
+        
+        # If context-based mapping failed, distribute by order
+        # MLSBD usually orders: 480p, 720p, 1080p, 4K
+        if all(len(v) == 0 for v in quality_map.values()) and unmapped:
+            order = ['480p', '720p HD', '1080p Full HD', '4K Ultra HD']
+            for i, url in enumerate(unmapped):
+                if i < len(order):
+                    quality_map[order[i]].append(url)
+        
+        # Resolve each quality's savelinks
+        quality_downloads = {}
+        for quality, urls in quality_map.items():
+            if urls:
+                logger.info(f"  🔄 Resolving {quality}...")
+                links = resolve_savelinks(urls[0], movie_url)
+                if links:
+                    quality_downloads[quality] = links
+                    logger.info(f"  📦 {quality}: {', '.join(links.keys())}")
+                time.sleep(1)
+        
+        # Also return best quality links as flat dict (for backward compat)
+        best_links = {}
+        for q in ['4K Ultra HD', '1080p Full HD', '720p HD', '480p']:
+            if q in quality_downloads:
+                best_links = quality_downloads[q]
+                break
+        
+        return best_links, quality_downloads
+        
     except Exception as e:
         logger.error(f"Download links fetch error: {e}")
-        return {}
+        return {}, {}
 
 def fetch_poster_from_movie_page(movie_url):
     """Fetch poster URL from MLSBD movie detail page"""
@@ -185,7 +249,7 @@ def ensure_unique_slug(cursor, slug):
 
 def insert_movie(cursor, movie_data):
     """
-    Smart upsert: merge quality into existing movie if same base title exists.
+    Smart upsert: merge ALL qualities into existing movie if same base title exists.
     Never creates duplicate rows for the same movie.
     """
     try:
@@ -193,28 +257,42 @@ def insert_movie(cursor, movie_data):
         quality    = movie_data.get("quality", "720p HD")
         dl         = movie_data.get("download_links", {}) or {}
         dl_json    = json.dumps(dl) if dl else None
+        # quality_downloads = dict of {quality: {links}} for ALL qualities
+        quality_downloads = movie_data.get("quality_downloads", {}) or {}
 
         existing = get_existing_by_base_title(cursor, base_title)
 
         if existing:
-            # ── MERGE quality into existing row ──
+            # ── MERGE qualities into existing row ──
             movie_id = existing[0]
             try:
                 avail = json.loads(existing[2] or '[]')
             except Exception:
                 avail = []
-            if quality not in avail:
-                avail.append(quality)
-
             try:
                 qv = json.loads(existing[3] or '{}')
             except Exception:
                 qv = {}
-            qv[quality] = {
-                'size': 'Unknown',
-                'download_links': dl,
-                'mlsbd_url': movie_data.get('mlsbd_url', ''),
-            }
+
+            # Merge all detected qualities
+            if quality_downloads:
+                for q, links in quality_downloads.items():
+                    if q not in avail:
+                        avail.append(q)
+                    qv[q] = {
+                        'size': 'Unknown',
+                        'download_links': links,
+                        'mlsbd_url': movie_data.get('mlsbd_url', ''),
+                    }
+            else:
+                # Fallback: just single quality
+                if quality not in avail:
+                    avail.append(quality)
+                qv[quality] = {
+                    'size': 'Unknown',
+                    'download_links': dl,
+                    'mlsbd_url': movie_data.get('mlsbd_url', ''),
+                }
 
             QP = {'4K Ultra HD': 4, '1080p Full HD': 3, '720p HD': 2, '480p': 1}
             best_quality = max(avail, key=lambda q: QP.get(q, 0))
@@ -228,7 +306,7 @@ def insert_movie(cursor, movie_data):
                     updated_at          = NOW()
                 WHERE id = %s
             """, (json.dumps(avail), json.dumps(qv), best_quality, movie_data.get('poster_url'), movie_id))
-            logger.info(f"  🔄 Merged quality [{quality}] into existing movie")
+            logger.info(f"  🔄 Merged {len(avail)} qualities into existing movie")
             return movie_id
 
         else:
@@ -236,8 +314,21 @@ def insert_movie(cursor, movie_data):
             slug = generate_slug(base_title)
             slug = ensure_unique_slug(cursor, slug)
 
-            qv = {quality: {'size': 'Unknown', 'download_links': dl,
-                            'mlsbd_url': movie_data.get('mlsbd_url', '')}}
+            # Build quality_variants from all detected qualities
+            if quality_downloads:
+                qv = {}
+                avail = []
+                for q, links in quality_downloads.items():
+                    avail.append(q)
+                    qv[q] = {'size': 'Unknown', 'download_links': links,
+                             'mlsbd_url': movie_data.get('mlsbd_url', '')}
+                QP = {'4K Ultra HD': 4, '1080p Full HD': 3, '720p HD': 2, '480p': 1}
+                best_quality = max(avail, key=lambda q: QP.get(q, 0))
+            else:
+                avail = [quality]
+                qv = {quality: {'size': 'Unknown', 'download_links': dl,
+                                'mlsbd_url': movie_data.get('mlsbd_url', '')}}
+                best_quality = quality
 
             cursor.execute(
                 """
@@ -252,9 +343,9 @@ def insert_movie(cursor, movie_data):
                     movie_data["mlsbd_url"],
                     dl_json,
                     movie_data.get("poster_url"),
-                    quality,
+                    best_quality,
                     movie_data.get("year"),
-                    json.dumps([quality]),
+                    json.dumps(avail),
                     json.dumps(qv),
                     base_title,
                 )
@@ -349,9 +440,11 @@ def main():
             if poster_url:
                 logger.info(f"  🖼️ Poster found")
             
-            # Fetch download links
-            download_links = fetch_download_links_from_page(post_url)
-            if download_links:
+            # Fetch download links - ALL qualities
+            download_links, quality_downloads = fetch_download_links_from_page(post_url)
+            if quality_downloads:
+                logger.info(f"  📦 Quality downloads: {list(quality_downloads.keys())}")
+            elif download_links:
                 logger.info(f"  📦 Download links: {', '.join(download_links.keys())}")
             
             movie_data = {
@@ -359,6 +452,7 @@ def main():
                 'mlsbd_url': post_url,
                 'poster_url': poster_url,
                 'download_links': download_links,
+                'quality_downloads': quality_downloads,
                 'quality': quality,
                 'year': year,
             }
