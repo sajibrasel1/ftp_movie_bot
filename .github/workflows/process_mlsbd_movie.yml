@@ -1,0 +1,49 @@
+name: Process MLSBD Movie
+
+on:
+  workflow_dispatch:
+    inputs:
+      movie_id:
+        description: 'Movie ID'
+        required: true
+        type: string
+      movie_title:
+        description: 'Movie Title'
+        required: true
+        type: string
+      movie_url:
+        description: 'Movie URL'
+        required: true
+        type: string
+      download_links:
+        description: 'Download Links JSON'
+        required: false
+        type: string
+      poster_url:
+        description: 'Poster URL'
+        required: false
+        type: string
+
+jobs:
+  process_movie:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Process Movie
+        run: |
+          echo "Processing movie: ${{ github.event.inputs.movie_title }}"
+          echo "Movie ID: ${{ github.event.inputs.movie_id }}"
+          echo "Movie URL: ${{ github.event.inputs.movie_url }}"
+          echo "Download Links: ${{ github.event.inputs.download_links }}"
+          echo "Poster URL: ${{ github.event.inputs.poster_url }}"
